@@ -1,10 +1,10 @@
-cat << 'EOF' > "$HOME/Desktop/TechnoEngine_V5/techno_engine_v5.py"
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import os, sys, glob, json, time, shutil, subprocess, threading, webbrowser
 import urllib.request, urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# System-Pfade für macOS Homebrew und Standard-Tools absichern
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", "")
 BASE = os.path.dirname(os.path.abspath(__file__))
 VAULT = os.path.join(BASE, "input_vault")
@@ -12,9 +12,49 @@ EXPORT = os.path.join(BASE, "export_teasers")
 STYLES = os.path.join(BASE, "styles")
 TEMP = os.path.join(BASE, ".cache_engine")
 
+CURRENT_VERSION = "5.2.0"
+GITHUB_RAW_URL = "https://raw.githubusercontent.com/NutriAiLab/techno_engine/main/techno_engine_v5.py"
+
 for d in [VAULT, EXPORT, STYLES, TEMP]:
     os.makedirs(d, exist_ok=True)
 
+def check_for_github_update():
+    """Prüft online auf GitHub, ob eine neuere Version hinterlegt ist."""
+    try:
+        req = urllib.request.Request(GITHUB_RAW_URL, headers={"User-Agent": "TechnoEngineUpdater/1.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            content = resp.read().decode("utf-8")
+        import re
+        m = re.search(r'CURRENT_VERSION\s*=\s*["\']([^"\']+)["\']', content)
+        if m:
+            remote_ver = m.group(1)
+            has_update = remote_ver != CURRENT_VERSION
+            return {"status": "ok", "has_update": has_update, "remote_version": remote_ver, "current_version": CURRENT_VERSION}
+        return {"status": "ok", "has_update": False, "remote_version": CURRENT_VERSION, "current_version": CURRENT_VERSION}
+    except Exception as e:
+        return {"status": "error", "message": str(e), "current_version": CURRENT_VERSION}
+
+def install_github_update():
+    """Lädt den neuesten Code direkt von GitHub herunter und aktualisiert die Datei."""
+    try:
+        req = urllib.request.Request(GITHUB_RAW_URL, headers={"User-Agent": "TechnoEngineUpdater/1.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            new_code = resp.read().decode("utf-8")
+        
+        target_path = os.path.abspath(__file__)
+        with open(target_path, "w", encoding="utf-8") as f:
+            f.write(new_code)
+            
+        def restart_server():
+            time.sleep(0.8)
+            os.execv(sys.executable, [sys.executable, target_path])
+
+        threading.Thread(target=restart_server, daemon=True).start()
+        return {"status": "ok", "message": "Update erfolgreich installiert! Starte neu..."}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+# Vorhandene Dateien aus altem Teaser-Ordner retten
 OLD = os.path.expanduser("~/Desktop/160_BPM_Teaser")
 if os.path.exists(OLD):
     for f in glob.glob(os.path.join(OLD, "*.*")):
@@ -79,6 +119,7 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=Tr
             fpath = fp
             break
 
+    # Text-Sicherheits-Escaping für FFmpeg drawtext
     clean_hook = hook.replace(":", "\\:").replace("'", "").strip()
     txt = ""
     if fpath:
@@ -88,6 +129,7 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=Tr
             "y='520+8*lt(mod(t,{}),0.05)'".format(clean_hook, fpath, bd)
         )
 
+    # Visueller Filtergraph mit Bounce, Farbanpassung und Glitches
     fg = (
         "[0:v]fps=30,scale=1120:1990:force_original_aspect_ratio=increase,"
         "crop=1080:1920:x='(in_w-out_w)/2':y='(in_h-out_h)/2+{}*lt(mod(t,{}),0.05)',"
@@ -107,6 +149,7 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=Tr
     fade_out_time = float(dur) - 0.004
     base_audio_fade = "afade=t=in:st=0:d=0.004,afade=t=out:st={:.4f}:d=0.004".format(fade_out_time)
     
+    # Reverse-Build-up: Kick bei 0.00s -> Tiefpass-Spannung von 0.40s bis 1.60s -> Drop ab 1.60s
     if use_retention_hook:
         t_break_start = "{:.4f}".format(beat_dur)
         t_drop_start = "{:.4f}".format(beat_dur * 4)
@@ -149,6 +192,7 @@ def run_job(style_key, variants, custom_hook, use_retention):
     audio = auds[0]
     pdata = PRESETS.get(style_key, PRESETS["warehouse"])
     
+    # Hookline: Wenn der Nutzer im Cockpit etwas eingegeben hat, nutzen wir das
     active_hook = custom_hook.strip() if custom_hook and custom_hook.strip() else pdata["hook"]
     STATUS["logs"].append("[Audio] Verwende: " + os.path.basename(audio))
     STATUS["logs"].append("[Hookline] Text gesetzt: \"" + active_hook + "\"")
@@ -202,17 +246,28 @@ def run_job(style_key, variants, custom_hook, use_retention):
     STATUS["logs"].append("[Erfolg] Alle Teaser fertig gerendert!")
     os.system("afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &")
 
-HTML = """<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>Techno Engine V5.1</title><script src="https://cdn.tailwindcss.com"></script></head>
+HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>Techno Engine V{CURRENT_VERSION}</title><script src="https://cdn.tailwindcss.com"></script></head>
 <body class="bg-zinc-950 text-zinc-100 p-8 font-mono max-w-2xl mx-auto space-y-6">
   <div class="border-b border-zinc-800 pb-4 flex justify-between items-center">
     <div>
-      <h1 class="text-xl font-black text-red-500">HARD-TECHNO ENGINE V5.1</h1>
+      <div class="flex items-center space-x-2">
+        <h1 class="text-xl font-black text-red-500">HARD-TECHNO ENGINE</h1>
+        <span class="text-[11px] bg-red-950/70 text-red-400 border border-red-800/80 px-2 py-0.5 rounded font-bold">v{CURRENT_VERSION}</span>
+      </div>
       <p class="text-[10px] text-zinc-500 uppercase tracking-widest">MacBook Air Edition • Native Performance</p>
     </div>
-    <div class="space-x-3 text-xs">
-      <button onclick="fetch('/api/folder?t=vault')" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded transition">Input-Vault</button>
-      <button onclick="fetch('/api/folder?t=export')" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded transition">Export-Ordner</button>
+    <div class="flex items-center space-x-2 text-xs">
+      <button id="updBtn" onclick="checkUpdate()" class="px-3 py-1 bg-zinc-900 border border-zinc-700 hover:border-red-500 text-zinc-300 hover:text-white rounded transition flex items-center space-x-1">
+        <span>🔄</span><span>Update suchen</span>
+      </button>
+      <button onclick="fetch('/api/folder?t=vault')" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded transition">Vault</button>
+      <button onclick="fetch('/api/folder?t=export')" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded transition">Export</button>
     </div>
+  </div>
+
+  <div id="updBanner" class="hidden p-3 rounded text-xs flex justify-between items-center">
+    <span id="updMsg"></span>
+    <button onclick="installUpdate()" id="updInstBtn" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition">Jetzt installieren</button>
   </div>
 
   <div class="space-y-1">
@@ -243,7 +298,7 @@ HTML = """<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>T
       <div class="text-xs font-bold text-zinc-300">Reverse-Build-up (Anti-Swipe-Schock)</div>
       <div class="text-[11px] text-zinc-500">Kick bei 0.00s + Filter-Spannung stoppt sofortiges Abbrechen</div>
     </div>
-    <input type="checkbox" id="retention" checked class="w-5 h-5 accent-red-600 rounded cursor-pointer">
+    <input type="checkbox" id="retention" checked class="w-5 h-5 accent-red-600 cursor-pointer">
   </div>
 
   <button id="btn" onclick="start()" class="w-full py-4 bg-red-600 hover:bg-red-500 transition rounded font-black text-sm uppercase tracking-wider shadow-lg">Teaser jetzt rendern</button>
@@ -256,39 +311,81 @@ HTML = """<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>T
 
   <div id="res" class="space-y-2"></div>
 <script>
-async function start(){
+async function checkUpdate(){{
+  const b=document.getElementById('updBtn');
+  b.innerHTML='<span>⏳</span><span>Prüfe...</span>';
+  b.disabled=true;
+  try {{
+    const res=await(await fetch('/api/check_update')).json();
+    if(res.has_update){{
+      const banner=document.getElementById('updBanner');
+      banner.className='bg-emerald-950/60 border border-emerald-700 text-emerald-300 p-3 rounded text-xs flex justify-between items-center';
+      document.getElementById('updMsg').innerText=`Neues Update gefunden: v${{res.remote_version}} (Aktuell: v${{res.current_version}})`;
+      banner.classList.remove('hidden');
+      b.innerHTML='<span>⚡</span><span>Update da!</span>';
+    }} else {{
+      b.innerHTML=`<span>✓</span><span>Aktuell (v${{res.current_version}})</span>`;
+      setTimeout(()=>{{b.innerHTML='<span>🔄</span><span>Update suchen</span>';b.disabled=false;}},3000);
+    }}
+  }} catch(e){{
+    b.innerHTML='<span>⚠️</span><span>Offline</span>';
+    setTimeout(()=>{{b.innerHTML='<span>🔄</span><span>Update suchen</span>';b.disabled=false;}},3000);
+  }}
+}}
+
+async function installUpdate(){{
+  const instBtn=document.getElementById('updInstBtn');
+  instBtn.disabled=true;
+  instBtn.innerText='Lade von GitHub...';
+  try {{
+    const res=await(await fetch('/api/install_update',{{method:'POST'}})).json();
+    if(res.status==='ok'){{
+      document.getElementById('updMsg').innerText='✓ Erfolgreich aktualisiert! Starte neu...';
+      instBtn.classList.add('hidden');
+      setTimeout(()=>{{window.location.reload();}},2500);
+    }} else {{
+      document.getElementById('updMsg').innerText='Fehler: '+res.message;
+      instBtn.disabled=false;
+      instBtn.innerText='Wiederholen';
+    }}
+  }} catch(e){{
+    setTimeout(()=>{{window.location.reload();}},3000);
+  }}
+}}
+
+async function start(){{
   document.getElementById('btn').disabled=true;
-  await fetch('/api/render',{
+  await fetch('/api/render',{{
     method:'POST',
-    body:JSON.stringify({
+    body:JSON.stringify({{
       p: document.getElementById('p').value,
       v: parseInt(document.getElementById('v').value),
       hook: document.getElementById('hook').value,
       retention: document.getElementById('retention').checked
-    })
-  });
+    }})
+  }});
   poll();
-}
-async function poll(){
+}}
+async function poll(){{
   const d=await(await fetch('/api/status')).json();
   document.getElementById('pbar').style.width=d.progress+'%';
   document.getElementById('ptxt').innerText=d.progress+'%';
   document.getElementById('logs').innerHTML=d.logs.map(l=>'<div>'+l+'</div>').join('');
-  if(d.results&&d.results.length>0){
+  if(d.results&&d.results.length>0){{
     document.getElementById('res').innerHTML=d.results.map(r=>`
       <div class="bg-zinc-900 p-3 rounded border border-zinc-800 flex justify-between items-center text-xs">
         <div>
-          <div class="font-bold text-zinc-200">${r.filename}</div>
-          <div class="text-[11px] text-zinc-500">Drop bei ${r.drop}</div>
+          <div class="font-bold text-zinc-200">${{r.filename}}</div>
+          <div class="text-[11px] text-zinc-500">Drop bei ${{r.drop}}</div>
         </div>
         <div class="space-x-2">
-          <button onclick="fetch('/api/open?p='+encodeURIComponent('${r.filepath}'))" class="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-white font-bold transition">In QuickTime</button>
-          <button onclick="fetch('/api/reveal?p='+encodeURIComponent('${r.filepath}'))" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-zinc-300 transition">Im Finder</button>
+          <button onclick="fetch('/api/open?p='+encodeURIComponent('${{r.filepath}}'))" class="px-3 py-1 bg-red-600 hover:bg-red-500 rounded text-white font-bold transition">In QuickTime</button>
+          <button onclick="fetch('/api/reveal?p='+encodeURIComponent('${{r.filepath}}'))" class="px-3 py-1 bg-zinc-800 hover:bg-zinc-700 rounded text-zinc-300 transition">Im Finder</button>
         </div>
       </div>`).join('');
-  }
-  if(d.progress===100||(d.progress===0&&d.logs.some(l=>l.includes('FEHLER')))){document.getElementById('btn').disabled=false;}else{setTimeout(poll,700);}
-}
+  }}
+  if(d.progress===100||(d.progress===0&&d.logs.some(l=>l.includes('FEHLER')))){{document.getElementById('btn').disabled=false;}}else{{setTimeout(poll,700);}}
+}}
 </script></body></html>"""
 
 class H(BaseHTTPRequestHandler):
@@ -307,6 +404,12 @@ class H(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(STATUS).encode("utf-8"))
+        elif p == "/api/check_update":
+            res = check_for_github_update()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
         elif p == "/api/folder":
             t = self.path.split("t=")[-1]
             subprocess.Popen(["open", VAULT if t == "vault" else EXPORT])
@@ -342,11 +445,20 @@ class H(BaseHTTPRequestHandler):
             ).start()
             self.send_response(200)
             self.end_headers()
+        elif self.path == "/api/install_update":
+            res = install_github_update()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+
+class ReusableHTTPServer(HTTPServer):
+    allow_reuse_address = True
 
 def main():
-    server = HTTPServer(("127.0.0.1", 8505), H)
+    server = ReusableHTTPServer(("127.0.0.1", 8505), H)
     url = "http://127.0.0.1:8505"
-    print("\n[OK] Cockpit V5.1 aktiv unter: " + url)
+    print("\n[OK] Cockpit V5.2 aktiv unter: " + url)
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
@@ -355,6 +467,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-EOF
-kill $(lsof -t -i:8505) 2>/dev/null || true
-echo "FERTIG! V5.1 ist scharf geschaltet."
