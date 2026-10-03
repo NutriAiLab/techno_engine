@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-import os, sys, glob, json, time, shutil, subprocess, threading, webbrowser
+"""
+HARD-TECHNO ENGINE V5.3.0
+- Tab 1: Video-Teaser Generator (TikTok/Reels Safe-Zone, Reverse-Build-up, Bass-Bounce)
+- Tab 2: DJ Crate-Digger (Spotlight-Suche via mdfind, Best-Version WAV > MP3, Denon .m3u8 Export)
+- 1-Klick GitHub Live-Updater
+"""
+import os, sys, glob, json, time, shutil, subprocess, threading, webbrowser, re
 import urllib.request, urllib.parse
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# System-Pfade für macOS Homebrew und Standard-Tools absichern
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", "")
 BASE = os.path.dirname(os.path.abspath(__file__))
 VAULT = os.path.join(BASE, "input_vault")
@@ -12,11 +17,15 @@ EXPORT = os.path.join(BASE, "export_teasers")
 STYLES = os.path.join(BASE, "styles")
 TEMP = os.path.join(BASE, ".cache_engine")
 
-CURRENT_VERSION = "5.2.0"
+CURRENT_VERSION = "5.3.0"
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/NutriAiLab/techno_engine/main/techno_engine_v5.py"
 
 for d in [VAULT, EXPORT, STYLES, TEMP]:
     os.makedirs(d, exist_ok=True)
+
+# Status-Speicher
+STATUS = {"progress": 0, "logs": [], "results": []}
+CRATE_RESULTS = {"total_queried": 0, "found_count": 0, "missing_count": 0, "items": [], "playlist_path": ""}
 
 def check_for_github_update():
     """Prüft online auf GitHub, ob eine neuere Version hinterlegt ist."""
@@ -24,7 +33,6 @@ def check_for_github_update():
         req = urllib.request.Request(GITHUB_RAW_URL, headers={"User-Agent": "TechnoEngineUpdater/1.0"})
         with urllib.request.urlopen(req, timeout=4) as resp:
             content = resp.read().decode("utf-8")
-        import re
         m = re.search(r'CURRENT_VERSION\s*=\s*["\']([^"\']+)["\']', content)
         if m:
             remote_ver = m.group(1)
@@ -54,19 +62,6 @@ def install_github_update():
     except Exception as e:
         return {"status": "error", "message": str(e)}
 
-# Vorhandene Dateien aus altem Teaser-Ordner retten
-OLD = os.path.expanduser("~/Desktop/160_BPM_Teaser")
-if os.path.exists(OLD):
-    for f in glob.glob(os.path.join(OLD, "*.*")):
-        dst = os.path.join(VAULT, os.path.basename(f))
-        if not os.path.exists(dst):
-            try:
-                shutil.copy2(f, dst)
-            except Exception:
-                pass
-
-STATUS = {"progress": 0, "logs": [], "results": []}
-
 PRESETS = {
     "warehouse": {
         "name": "Industrial Warehouse",
@@ -94,6 +89,138 @@ PRESETS = {
     }
 }
 
+# ==============================================================================
+# 1. CRATE-DIGGER & SPOTLIGHT SUCH-LOGIK
+# ==============================================================================
+
+def clean_track_query(raw_title):
+    """Bereinigt Track-Titel von Playlisten-Nummerierungen und Zusätzen."""
+    t = raw_title.strip()
+    t = re.sub(r'^\d+[\.\-\s_]+', '', t)
+    t = re.sub(r'\[.*?\]', '', t)
+    t = re.sub(r'\(.*?(mix|edit|master|original|vip|remix|dub).*?\)', '', t, flags=re.IGNORECASE)
+    t = re.sub(r'[\(\)]', '', t)
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+def rate_audio_file(filepath):
+    """Bewertet gefundene Dateien nach Audioqualität (WAV > AIFF > FLAC > MP3)."""
+    ext = os.path.splitext(filepath)[1].lower()
+    score = 10
+    label = ext.upper().replace(".", "")
+    if ext == ".wav":
+        score = 100
+    elif ext in (".aiff", ".aif"):
+        score = 90
+    elif ext == ".flac":
+        score = 85
+    elif ext == ".m4a":
+        score = 60
+    elif ext == ".mp3":
+        score = 40
+        try:
+            sz = os.path.getsize(filepath)
+            if sz > 10 * 1024 * 1024:
+                score += 15
+                label += " (320k)"
+            else:
+                label += " (Standard)"
+        except Exception:
+            pass
+    return score, label
+
+def find_track_on_mac(query_str):
+    """Sucht via macOS Spotlight (mdfind) blitzschnell nach der besten Audio-Datei."""
+    clean = clean_track_query(query_str)
+    if not clean or len(clean) < 3:
+        return None
+    
+    tokens = [tok for tok in re.split(r'[\s\-_]+', clean) if len(tok) >= 3][:3]
+    if not tokens:
+        tokens = [clean]
+    
+    predicates = " && ".join([f'kMDItemFSName == "*{tok}*"c' for tok in tokens])
+    audio_type = '(kMDItemContentTypeTree == "public.audio" || kMDItemFSName == "*.wav"c || kMDItemFSName == "*.mp3"c || kMDItemFSName == "*.aiff"c || kMDItemFSName == "*.flac"c)'
+    full_query = f'{audio_type} && ({predicates})'
+    
+    try:
+        raw = subprocess.check_output(["mdfind", full_query], timeout=4).decode("utf-8").strip()
+        lines = [line.strip() for line in raw.split("\n") if line.strip() and os.path.isfile(line.strip())]
+        if not lines:
+            fallback_query = f'{audio_type} && kMDItemFSName == "*{tokens[0]}*"c'
+            raw = subprocess.check_output(["mdfind", fallback_query], timeout=4).decode("utf-8").strip()
+            lines = [line.strip() for line in raw.split("\n") if line.strip() and os.path.isfile(line.strip())]
+    except Exception:
+        lines = []
+
+    if not lines:
+        return None
+    
+    rated = []
+    for f in lines:
+        sc, lbl = rate_audio_file(f)
+        rated.append((sc, lbl, f))
+    rated.sort(key=lambda x: x[0], reverse=True)
+    best = rated[0]
+    return {"path": best[2], "filename": os.path.basename(best[2]), "format": best[1], "score": best[0]}
+
+def parse_and_scan_crate(raw_text):
+    """Verarbeitet eine Liste aus dem Textfeld und ordnet Dateien zu."""
+    lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+    items = []
+    found_count = 0
+    missing_count = 0
+    
+    for raw in lines:
+        res = find_track_on_mac(raw)
+        if res:
+            found_count += 1
+            items.append({
+                "query": raw,
+                "found": True,
+                "path": res["path"],
+                "filename": res["filename"],
+                "format": res["format"]
+            })
+        else:
+            missing_count += 1
+            items.append({
+                "query": raw,
+                "found": False,
+                "path": "",
+                "filename": "",
+                "format": "FEHLT"
+            })
+            
+    CRATE_RESULTS["total_queried"] = len(lines)
+    CRATE_RESULTS["found_count"] = found_count
+    CRATE_RESULTS["missing_count"] = missing_count
+    CRATE_RESULTS["items"] = items
+    return CRATE_RESULTS
+
+def export_denon_m3u8(playlist_name="Denon_Gig_Playlist"):
+    """Erzeugt eine Standard M3U8 Playlist, die Denon Engine DJ direkt einliest."""
+    found_items = [it for it in CRATE_RESULTS["items"] if it["found"] and it["path"]]
+    if not found_items:
+        return {"status": "error", "message": "Keine gefundenen Tracks zum Exportieren vorhanden."}
+    
+    clean_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', playlist_name.strip()) or "Denon_Playlist"
+    out_file = os.path.join(EXPORT, f"{clean_name}_{int(time.time())}.m3u8")
+    
+    with open(out_file, "w", encoding="utf-8") as f:
+        f.write("#EXTM3U\n")
+        for it in found_items:
+            f.write(f"#EXTINF:-1,{it['query']}\n")
+            f.write(f"{it['path']}\n")
+            
+    CRATE_RESULTS["playlist_path"] = out_file
+    subprocess.Popen(["open", "-R", out_file])
+    return {"status": "ok", "path": out_file, "filename": os.path.basename(out_file)}
+
+# ==============================================================================
+# 2. VIDEO-RENDER-PIPELINE (UNVERÄNDERT STABIL)
+# ==============================================================================
+
 def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=True):
     bpm, loops = 150.0, 4
     beat_dur = 60.0 / bpm
@@ -119,7 +246,6 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=Tr
             fpath = fp
             break
 
-    # Text-Sicherheits-Escaping für FFmpeg drawtext
     clean_hook = hook.replace(":", "\\:").replace("'", "").strip()
     txt = ""
     if fpath:
@@ -129,7 +255,6 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=Tr
             "y='520+8*lt(mod(t,{}),0.05)'".format(clean_hook, fpath, bd)
         )
 
-    # Visueller Filtergraph mit Bounce, Farbanpassung und Glitches
     fg = (
         "[0:v]fps=30,scale=1120:1990:force_original_aspect_ratio=increase,"
         "crop=1080:1920:x='(in_w-out_w)/2':y='(in_h-out_h)/2+{}*lt(mod(t,{}),0.05)',"
@@ -149,7 +274,6 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention_hook=Tr
     fade_out_time = float(dur) - 0.004
     base_audio_fade = "afade=t=in:st=0:d=0.004,afade=t=out:st={:.4f}:d=0.004".format(fade_out_time)
     
-    # Reverse-Build-up: Kick bei 0.00s -> Tiefpass-Spannung von 0.40s bis 1.60s -> Drop ab 1.60s
     if use_retention_hook:
         t_break_start = "{:.4f}".format(beat_dur)
         t_drop_start = "{:.4f}".format(beat_dur * 4)
@@ -192,7 +316,6 @@ def run_job(style_key, variants, custom_hook, use_retention):
     audio = auds[0]
     pdata = PRESETS.get(style_key, PRESETS["warehouse"])
     
-    # Hookline: Wenn der Nutzer im Cockpit etwas eingegeben hat, nutzen wir das
     active_hook = custom_hook.strip() if custom_hook and custom_hook.strip() else pdata["hook"]
     STATUS["logs"].append("[Audio] Verwende: " + os.path.basename(audio))
     STATUS["logs"].append("[Hookline] Text gesetzt: \"" + active_hook + "\"")
@@ -246,15 +369,19 @@ def run_job(style_key, variants, custom_hook, use_retention):
     STATUS["logs"].append("[Erfolg] Alle Teaser fertig gerendert!")
     os.system("afplay /System/Library/Sounds/Glass.aiff 2>/dev/null &")
 
-HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>Techno Engine V{CURRENT_VERSION}</title><script src="https://cdn.tailwindcss.com"></script></head>
-<body class="bg-zinc-950 text-zinc-100 p-8 font-mono max-w-2xl mx-auto space-y-6">
+# ==============================================================================
+# 3. DAS COCKPIT (HTML & TABS)
+# ==============================================================================
+
+HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>Hard Techno Engine & Crate-Digger V{CURRENT_VERSION}</title><script src="https://cdn.tailwindcss.com"></script></head>
+<body class="bg-zinc-950 text-zinc-100 p-6 md:p-8 font-mono max-w-3xl mx-auto space-y-6">
   <div class="border-b border-zinc-800 pb-4 flex justify-between items-center">
     <div>
       <div class="flex items-center space-x-2">
-        <h1 class="text-xl font-black text-red-500">HARD-TECHNO ENGINE</h1>
+        <h1 class="text-xl font-black text-red-500">HARD-TECHNO SUITE</h1>
         <span class="text-[11px] bg-red-950/70 text-red-400 border border-red-800/80 px-2 py-0.5 rounded font-bold">v{CURRENT_VERSION}</span>
       </div>
-      <p class="text-[10px] text-zinc-500 uppercase tracking-widest">MacBook Air Edition • Native Performance</p>
+      <p class="text-[10px] text-zinc-500 uppercase tracking-widest">MacBook Air Edition • Crate-Digger & Video-Engine</p>
     </div>
     <div class="flex items-center space-x-2 text-xs">
       <button id="updBtn" onclick="checkUpdate()" class="px-3 py-1 bg-zinc-900 border border-zinc-700 hover:border-red-500 text-zinc-300 hover:text-white rounded transition flex items-center space-x-1">
@@ -270,47 +397,107 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8"><title>
     <button onclick="installUpdate()" id="updInstBtn" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition">Jetzt installieren</button>
   </div>
 
-  <div class="space-y-1">
-    <label class="text-xs text-zinc-400 block font-bold">1. Eigener Text-Hook (Optional)</label>
-    <input type="text" id="hook" placeholder="z. B. POV: FIRST TIME VERKNIPT (Leer = Preset-Hook)" class="w-full bg-zinc-900 border border-zinc-700 p-2.5 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-red-500">
+  <!-- NAVIGATION TABS -->
+  <div class="grid grid-cols-2 gap-2 bg-zinc-900 p-1 rounded border border-zinc-800 text-xs font-bold text-center">
+    <button id="tabVideoBtn" onclick="switchTab('video')" class="py-2.5 rounded bg-red-600 text-white transition">🎬 1. VIDEO-TEASER ENGINE</button>
+    <button id="tabCrateBtn" onclick="switchTab('crate')" class="py-2.5 rounded text-zinc-400 hover:text-white transition">🎧 2. CRATE-DIGGER & DENON</button>
   </div>
 
-  <div class="grid grid-cols-2 gap-4">
-    <div>
-      <label class="text-xs text-zinc-400 block mb-1 font-bold">2. Style-Preset</label>
-      <select id="p" class="w-full bg-zinc-900 border border-zinc-700 p-2.5 rounded text-sm text-zinc-200">
-        <option value="warehouse">Industrial Warehouse</option>
-        <option value="acid">Acid 303 Tunnel</option>
-        <option value="tribal">Y2K Cyber Tribal</option>
-      </select>
+  <!-- TAB 1: VIDEO TEASERS -->
+  <div id="tabVideo" class="space-y-4">
+    <div class="space-y-1">
+      <label class="text-xs text-zinc-400 block font-bold">1. Eigener Text-Hook (Optional)</label>
+      <input type="text" id="hook" placeholder="z. B. POV: FIRST TIME VERKNIPT (Leer = Preset-Hook)" class="w-full bg-zinc-900 border border-zinc-700 p-2.5 rounded text-sm text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-red-500">
     </div>
-    <div>
-      <label class="text-xs text-zinc-400 block mb-1 font-bold">3. Teaser-Anzahl</label>
-      <select id="v" class="w-full bg-zinc-900 border border-zinc-700 p-2.5 rounded text-sm text-zinc-200">
-        <option value="1">1 Teaser</option>
-        <option value="3" selected>3 Teaser</option>
-      </select>
+
+    <div class="grid grid-cols-2 gap-4">
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1 font-bold">2. Style-Preset</label>
+        <select id="p" class="w-full bg-zinc-900 border border-zinc-700 p-2.5 rounded text-sm text-zinc-200">
+          <option value="warehouse">Industrial Warehouse</option>
+          <option value="acid">Acid 303 Tunnel</option>
+          <option value="tribal">Y2K Cyber Tribal</option>
+        </select>
+      </div>
+      <div>
+        <label class="text-xs text-zinc-400 block mb-1 font-bold">3. Teaser-Anzahl</label>
+        <select id="v" class="w-full bg-zinc-900 border border-zinc-700 p-2.5 rounded text-sm text-zinc-200">
+          <option value="1">1 Teaser</option>
+          <option value="3" selected>3 Teaser</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="bg-zinc-900/60 p-3 rounded border border-zinc-800 flex items-center justify-between">
+      <div>
+        <div class="text-xs font-bold text-zinc-300">Reverse-Build-up (Anti-Swipe-Schock)</div>
+        <div class="text-[11px] text-zinc-500">Kick bei 0.00s + Filter-Spannung stoppt sofortiges Abbrechen</div>
+      </div>
+      <input type="checkbox" id="retention" checked class="w-5 h-5 accent-red-600 cursor-pointer">
+    </div>
+
+    <button id="btn" onclick="startRender()" class="w-full py-4 bg-red-600 hover:bg-red-500 transition rounded font-black text-sm uppercase tracking-wider shadow-lg">Teaser jetzt rendern</button>
+
+    <div class="bg-black p-4 rounded border border-zinc-800 space-y-2 text-xs">
+      <div class="flex justify-between text-zinc-400 font-bold"><span>Status:</span><span id="ptxt" class="text-red-500">0%</span></div>
+      <div class="bg-zinc-900 h-2 rounded overflow-hidden"><div id="pbar" class="bg-red-600 h-full w-0 transition-all duration-300"></div></div>
+      <div id="logs" class="text-zinc-500 text-[11px] pt-2 max-h-32 overflow-y-auto space-y-0.5">Bereit.</div>
+    </div>
+    <div id="res" class="space-y-2"></div>
+  </div>
+
+  <!-- TAB 2: CRATE-DIGGER & DENON -->
+  <div id="tabCrate" class="hidden space-y-4">
+    <div class="space-y-1">
+      <div class="flex justify-between items-center">
+        <label class="text-xs text-zinc-400 font-bold">Tracklist hier einfügen (Plaintext aus Notizen / Rekordbox / SoundCloud):</label>
+        <span class="text-[11px] text-zinc-500">Nutzt schnellen Mac-Spotlight-Index</span>
+      </div>
+      <textarea id="crateText" rows="6" placeholder="1. Nico Moreno - Purple Widow&#10;2. Klangkuenstler - Die Hölle kocht&#10;3. Alignment - Attack" class="w-full bg-zinc-900 border border-zinc-700 p-3 rounded text-xs text-zinc-100 placeholder-zinc-600 focus:outline-none focus:border-red-500"></textarea>
+    </div>
+
+    <div class="flex space-x-3">
+      <button id="crateBtn" onclick="startCrateScan()" class="flex-1 py-3 bg-red-600 hover:bg-red-500 rounded font-black text-xs uppercase transition tracking-wider">
+        🔍 Tracks auf dem Mac aufspüren
+      </button>
+      <button onclick="document.getElementById('crateText').value=''" class="px-4 py-3 bg-zinc-900 hover:bg-zinc-800 border border-zinc-700 rounded text-xs text-zinc-400">
+        Leeren
+      </button>
+    </div>
+
+    <!-- ERGEBNIS-BOX -->
+    <div id="crateSummary" class="hidden bg-zinc-900/80 p-4 rounded border border-zinc-800 space-y-3">
+      <div class="flex justify-between items-center text-xs">
+        <div>
+          <span class="text-zinc-400">Gefunden: </span>
+          <span id="crateMatchRate" class="font-bold text-emerald-400">0 / 0</span>
+        </div>
+        <div class="space-x-2 flex items-center">
+          <input type="text" id="plName" value="Denon_Gig_Playlist" class="bg-black border border-zinc-700 px-2 py-1 rounded text-xs text-zinc-200">
+          <button onclick="exportM3U8()" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition text-xs">
+            ⚡ Denon M3U8 Exportieren
+          </button>
+        </div>
+      </div>
+      <div id="crateItems" class="space-y-2 max-h-80 overflow-y-auto pt-2 border-t border-zinc-800 text-xs"></div>
     </div>
   </div>
 
-  <div class="bg-zinc-900/60 p-3 rounded border border-zinc-800 flex items-center justify-between">
-    <div>
-      <div class="text-xs font-bold text-zinc-300">Reverse-Build-up (Anti-Swipe-Schock)</div>
-      <div class="text-[11px] text-zinc-500">Kick bei 0.00s + Filter-Spannung stoppt sofortiges Abbrechen</div>
-    </div>
-    <input type="checkbox" id="retention" checked class="w-5 h-5 accent-red-600 cursor-pointer">
-  </div>
-
-  <button id="btn" onclick="start()" class="w-full py-4 bg-red-600 hover:bg-red-500 transition rounded font-black text-sm uppercase tracking-wider shadow-lg">Teaser jetzt rendern</button>
-
-  <div class="bg-black p-4 rounded border border-zinc-800 space-y-2 text-xs">
-    <div class="flex justify-between text-zinc-400 font-bold"><span>Status:</span><span id="ptxt" class="text-red-500">0%</span></div>
-    <div class="bg-zinc-900 h-2 rounded overflow-hidden"><div id="pbar" class="bg-red-600 h-full w-0 transition-all duration-300"></div></div>
-    <div id="logs" class="text-zinc-500 text-[11px] pt-2 max-h-32 overflow-y-auto space-y-0.5">Bereit.</div>
-  </div>
-
-  <div id="res" class="space-y-2"></div>
 <script>
+function switchTab(t){{
+  if(t==='video'){{
+    document.getElementById('tabVideo').classList.remove('hidden');
+    document.getElementById('tabCrate').classList.add('hidden');
+    document.getElementById('tabVideoBtn').className='py-2.5 rounded bg-red-600 text-white transition';
+    document.getElementById('tabCrateBtn').className='py-2.5 rounded text-zinc-400 hover:text-white transition';
+  }} else {{
+    document.getElementById('tabVideo').classList.add('hidden');
+    document.getElementById('tabCrate').classList.remove('hidden');
+    document.getElementById('tabCrateBtn').className='py-2.5 rounded bg-red-600 text-white transition';
+    document.getElementById('tabVideoBtn').className='py-2.5 rounded text-zinc-400 hover:text-white transition';
+  }}
+}}
+
 async function checkUpdate(){{
   const b=document.getElementById('updBtn');
   b.innerHTML='<span>⏳</span><span>Prüfe...</span>';
@@ -353,7 +540,8 @@ async function installUpdate(){{
   }}
 }}
 
-async function start(){{
+// TAB 1 RENDER
+async function startRender(){{
   document.getElementById('btn').disabled=true;
   await fetch('/api/render',{{
     method:'POST',
@@ -385,6 +573,51 @@ async function poll(){{
       </div>`).join('');
   }}
   if(d.progress===100||(d.progress===0&&d.logs.some(l=>l.includes('FEHLER')))){{document.getElementById('btn').disabled=false;}}else{{setTimeout(poll,700);}}
+}}
+
+// TAB 2 CRATE SCAN
+async function startCrateScan(){{
+  const text=document.getElementById('crateText').value;
+  if(!text.trim())return alert('Bitte erst eine Tracklist einfügen!');
+  const b=document.getElementById('crateBtn');
+  b.disabled=true;
+  b.innerText='⏳ Scanne SSD & USB-Laufwerke via Spotlight...';
+  try{{
+    const res=await(await fetch('/api/crate_scan',{{method:'POST',body:JSON.stringify({{text}})}})).json();
+    document.getElementById('crateSummary').classList.remove('hidden');
+    document.getElementById('crateMatchRate').innerText=`${{res.found_count}} von ${{res.total_queried}} gefunden (${{Math.round(res.found_count/res.total_queried*100)}}%)`;
+    document.getElementById('crateItems').innerHTML=res.items.map(it=>`
+      <div class="p-2.5 rounded ${{it.found?'bg-zinc-950 border border-zinc-800':'bg-red-950/20 border border-red-900/40'}} flex justify-between items-center">
+        <div>
+          <div class="font-bold ${{it.found?'text-zinc-200':'text-red-400'}}">${{it.found?'✅':'❌'}} ${{it.query}}</div>
+          ${{it.found?`<div class="text-[11px] text-zinc-500 truncate max-w-md">${{it.path}}</div>`:`<div class="text-[11px] text-red-500">Datei nicht auf dem Mac gefunden</div>`}}
+        </div>
+        <div class="flex items-center space-x-2">
+          <span class="px-2 py-0.5 rounded text-[10px] font-bold ${{it.found?'bg-emerald-950 text-emerald-400 border border-emerald-800':'bg-zinc-800 text-zinc-500'}}">${{it.format}}</span>
+          ${{it.found?`<button onclick="copyToVault('${{encodeURIComponent(it.path)}}')" class="px-2 py-1 bg-zinc-800 hover:bg-red-600 rounded text-[11px] text-zinc-300 hover:text-white transition">In Teaser-Vault</button>`:''}}
+        </div>
+      </div>
+    `).join('');
+  }}catch(e){{
+    alert('Fehler beim Scan: '+e);
+  }}
+  b.disabled=false;
+  b.innerText='🔍 Tracks auf dem Mac aufspüren';
+}}
+
+async function exportM3U8(){{
+  const name=document.getElementById('plName').value;
+  const res=await(await fetch('/api/crate_export',{{method:'POST',body:JSON.stringify({{name}})}})).json();
+  if(res.status==='ok'){{
+    alert(`✓ Playlist gespeichert: ${{res.filename}}\\nIm Finder markiert – einfach in Denon Engine DJ ziehen!`);
+  }} else {{
+    alert('Fehler: '+res.message);
+  }}
+}}
+
+async function copyToVault(pathEnc){{
+  const res=await(await fetch('/api/copy_vault?path='+pathEnc)).json();
+  alert(res.message);
 }}
 </script></body></html>"""
 
@@ -425,14 +658,28 @@ class H(BaseHTTPRequestHandler):
             subprocess.Popen(["open", "-R", f])
             self.send_response(200)
             self.end_headers()
+        elif p == "/api/copy_vault":
+            f = urllib.parse.unquote(self.path.split("path=")[-1])
+            if os.path.exists(f):
+                dst = os.path.join(VAULT, os.path.basename(f))
+                shutil.copy2(f, dst)
+                res = {"status": "ok", "message": f"✓ '{os.path.basename(f)}' in input_vault kopiert!"}
+            else:
+                res = {"status": "error", "message": "Datei nicht gefunden."}
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
         else:
             self.send_response(404)
             self.end_headers()
 
     def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
+        d = json.loads(body)
+        
         if self.path == "/api/render":
-            length = int(self.headers.get("Content-Length", 0))
-            d = json.loads(self.rfile.read(length).decode("utf-8"))
             threading.Thread(
                 target=run_job,
                 args=(
@@ -445,6 +692,18 @@ class H(BaseHTTPRequestHandler):
             ).start()
             self.send_response(200)
             self.end_headers()
+        elif self.path == "/api/crate_scan":
+            res = parse_and_scan_crate(d.get("text", ""))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif self.path == "/api/crate_export":
+            res = export_denon_m3u8(d.get("name", "Denon_Gig_Playlist"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(res).encode("utf-8"))
         elif self.path == "/api/install_update":
             res = install_github_update()
             self.send_response(200)
@@ -458,7 +717,7 @@ class ReusableHTTPServer(HTTPServer):
 def main():
     server = ReusableHTTPServer(("127.0.0.1", 8505), H)
     url = "http://127.0.0.1:8505"
-    print("\n[OK] Cockpit V5.2 aktiv unter: " + url)
+    print("\n[OK] Cockpit V5.3 aktiv unter: " + url)
     threading.Timer(0.6, lambda: webbrowser.open(url)).start()
     try:
         server.serve_forever()
