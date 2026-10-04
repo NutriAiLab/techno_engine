@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-TECH DUDE // SUITE V6.4.0 (Stabilization Master)
-- Gefixt: HTTP 206 Byte-Range Streaming für flüssiges In-App Video Playback auf WebKit/Safari
-- Gefixt: Track-Caching verhindert FFmpeg-Zombie-Prozesse und Mac-Freezes
-- Gefixt: Robuster Multipart-Uploader verhindert beschädigte Audio-Dateien
-- Gefixt: Cinema-Mode FFmpeg-Codec Kompatibilität (YUV420p + Deband)
+TECH DUDE // SUITE V6.5.0 (Master Release)
+- Reaktiviert: 1-Klick GitHub Live-Updater mit autonomem Server-Neustart
+- Gesichert: Gemini API-Key überlebt Updates in ~/.techdude_config.json und lädt automatisch
+- Gefixt: Interaktives Track-Dropdown (blauer Bereich) zum schnellen Wechseln von Songs
+- Gefixt: Cinema-Master EBU R128 + Deband ohne Crash
+- Erweitert: Säule 3 mit nativer Ordner-Auswahl (AppleScript) & 3 Modi (Viren, Duplikate, ID3-Edit)
+- Erweitert: 8 Hard-Techno Style Presets
 """
 
 import os, sys, glob, json, time, math, struct, shutil, subprocess, threading, re, hashlib
@@ -14,9 +16,10 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
 APP_NAME = "TECH DUDE"
-CURRENT_VERSION = "6.4.0"
+CURRENT_VERSION = "6.5.0"
 GITHUB_RAW_URL = "https://raw.githubusercontent.com/NutriAiLab/techno_engine/main/techno_engine_v5.py"
 
+# Homebrew- und System-Pfade für FFmpeg / FFprobe priorisieren
 os.environ["PATH"] = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", "")
 BASE = os.path.dirname(os.path.abspath(__file__))
 VAULT = os.path.join(BASE, "input_vault")
@@ -33,12 +36,11 @@ CRATE_RESULTS = {"total_queried": 0, "found_count": 0, "missing_count": 0, "item
 CLEANER_RESULTS = {"folder": "", "total_scanned": 0, "threats_found": 0, "items": [], "duplicates": []}
 SHARED_STATE = {
     "active_folder": os.path.expanduser("~/Downloads"),
-    "last_alert": ""
+    "last_alert": "",
+    "active_track_file": ""
 }
 
-# ==============================================================================
-# PERFORMANCE-CACHE: Verhindert Zombie-Prozesse und Mac-Überhitzung
-# ==============================================================================
+# In-Memory Cache verhindert wiederholte FFmpeg-Aufrufe und schützt die CPU
 TRACK_CACHE = {
     "path": "",
     "mtime": 0,
@@ -52,6 +54,10 @@ BUNKER_CACHE = {
         "acid": ["ACID THERAPY 160BPM", "303 INVASION", "ACID PRESSURE PEAK", "HYPNOTIC 303 MADNESS", "TB-303 AT MAXIMUM DRIVE", "PURE ANALOG RESISTANCE", "RAW ACID TOOL", "ACID VORTEX"],
         "tribal": ["POV: FIRST TIME VERKNIPT", "NEO-RAVE ENERGY 162 BPM", "DUTCH RAVE ESCALATION", "FAST & HEAVY TRIBAL", "CYBER RAVE VIBE", "TELETECH READY ID", "RAW PERCUSSION WEAPON", "GROOVE MEETS VIOLENCE"],
         "schranz": ["165 BPM SCHRANZ PRESSURE", "FRANKFURT SOUND REBORN", "MAXIMUM DISTORTION KICK", "PURE INDUSTRIAL SCHRANZ", "BASSFACE GUARANTEE", "NO RETREAT 165BPM"],
+        "hardgroove": ["PURE GROOVE WEAPON", "TIGHT ROLLING 909", "SPANISH HARDGROOVE TOOL", "NON-STOP PRESSURE", "RAW LATIN PERCUSSION"],
+        "berlin": ["BERLIN DARKROOM WEAPON", "RAW CONCRETE SOUND", "BASEMENT ACID FORCE", "SWEAT ON CONCRETE", "NO LIGHT ONLY SOUND"],
+        "neorave": ["NEO RAVE SPEED 164BPM", "CYBER TRANCE ENERGY", "HIGH OCTANE RAVE", "FAST & FURIOUS DROP", "EUPHORIC ACID ESCALATION"],
+        "industrial": ["INDUSTRIAL HAMMER", "METALLIC PERCUSSION", "HEAVY FACTORY KICK", "DISTORTION PROTOCOL", "RAW DRIVING VIOLENCE"],
         "general": ["UNRELEASED ID?", "DROP OR KEEP LOCKED?", "TESTING CLUB SOUNDSYSTEM", "PURE BASEMENT SOUND", "FIRST TIME PLAYED LIVE", "HARD TECHNO WEAPON"]
     },
     "visual_prompts": [
@@ -80,7 +86,7 @@ def save_user_config(cfg):
 def get_gemini_api_key():
     return load_user_config().get("gemini_api_key", "").strip()
 
-def call_gemini_api(prompt_text, system_instruction=None, timeout=3.0):
+def call_gemini_api(prompt_text, system_instruction=None, timeout=2.8):
     key = get_gemini_api_key()
     if not key: return None
         
@@ -100,6 +106,7 @@ def call_gemini_api(prompt_text, system_instruction=None, timeout=3.0):
                 parts_out = candidates[0].get("content", {}).get("parts", [])
                 if parts_out: return parts_out[0].get("text", "").strip()
     except Exception:
+        # Robuster Fallback auf Gemini 1.5 Flash
         try:
             url_15 = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={key}"
             req2 = urllib.request.Request(url_15, data=data_bytes, headers={"Content-Type": "application/json"}, method="POST")
@@ -113,8 +120,8 @@ def call_gemini_api(prompt_text, system_instruction=None, timeout=3.0):
     return None
 
 def generate_viral_hooks(track_name="", bpm=155.0, style_key="warehouse"):
-    sys_inst = "Du bist ein renommierter Hard-Techno Creative Director. Formuliere exakt 3 extrem kurze, schlagkräftige, virale Hooks für TikTok/Reels Teaser. Nur reißerischer Underground-Slang, komplett GROSSBUCHSTABEN, maximal 4-6 Wörter pro Hook. Gib ausschließlich ein valides JSON-Array aus drei Strings zurück, z.B. [\"HOOK 1\", \"HOOK 2\", \"HOOK 3\"]."
-    prompt = f"Track: '{track_name}', Tempo: {bpm:.0f} BPM, Subgenre-Style: {style_key}. Generiere 3 virale Hooklines."
+    sys_inst = "Du bist ein Hard-Techno Creative Director. Gib exakt 3 extrem kurze, virale Hooks für TikTok/Reels Teaser zurück. Underground-Slang, GROSSBUCHSTABEN, 4-6 Wörter. Ausschließlich valides JSON-Array aus 3 Strings, z.B. [\"HOOK 1\", \"HOOK 2\", \"HOOK 3\"]."
+    prompt = f"Track: '{track_name}', Tempo: {bpm:.0f} BPM, Stil: {style_key}. Generiere 3 virale Hooks."
     ai_raw = call_gemini_api(prompt, system_instruction=sys_inst)
     if ai_raw:
         try:
@@ -131,7 +138,7 @@ def generate_viral_hooks(track_name="", bpm=155.0, style_key="warehouse"):
 
 def parse_messy_tracklist_with_ai(raw_text):
     if not raw_text.strip(): return [], "bunker"
-    sys_inst = "Du bist ein professioneller DJ-Bibliotheks-Manager. Lies diesen Text und extrahiere jeden Musiktrack sauber. Entferne Emojis, Nummerierungen, Zusätze wie [FREE DL]. Formatiere strikt als 'Artist - Title'. Gib ausschließlich ein JSON-Array aus Strings zurück, z.B. [\"Klangkuenstler - Die Hoelle\"]."
+    sys_inst = "Du bist ein DJ-Bibliothekar. Extrahiere alle Musiktracks sauber aus dem Text. Entferne Emojis, Nummern und Tags wie [FREE DL]. Strikt als 'Artist - Title'. Gib ausschließlich ein JSON-Array aus Strings zurück."
     ai_res = call_gemini_api(raw_text, system_instruction=sys_inst)
     if ai_res:
         try:
@@ -153,11 +160,23 @@ FORMATS = {
 PRESETS = {
     "warehouse": {"name": "Industrial Warehouse", "grade": "eq=contrast=1.35:saturation=0.20", "bounce": 24, "flash": "0.45", "inv": 0.030, "hook": "UNRELEASED ID?"},
     "acid": {"name": "Acid 303 Tunnel", "grade": "colorchannelmixer=rr=0.4:gg=1.3:bb=0.6", "bounce": 28, "flash": "0.35", "inv": 0.040, "hook": "ACID THERAPY 160BPM"},
-    "tribal": {"name": "Y2K Cyber Tribal", "grade": "eq=contrast=1.40:saturation=1.15", "bounce": 26, "flash": "0.50", "inv": 0.032, "hook": "POV: FIRST TIME VERKNIPT"}
+    "tribal": {"name": "Y2K Cyber Tribal", "grade": "eq=contrast=1.40:saturation=1.15", "bounce": 26, "flash": "0.50", "inv": 0.032, "hook": "POV: FIRST TIME VERKNIPT"},
+    "schranz": {"name": "Schranz Distortion", "grade": "colorchannelmixer=rr=1.4:gg=0.2:bb=0.2,eq=contrast=1.5:saturation=1.2", "bounce": 32, "flash": "0.60", "inv": 0.050, "hook": "165 BPM PRESSURE"},
+    "hardgroove": {"name": "Hardgroove Minimal", "grade": "colorchannelmixer=rr=0.3:gg=0.3:bb=0.3,eq=contrast=1.2", "bounce": 14, "flash": "0.20", "inv": 0.0, "hook": "PURE GROOVE"},
+    "berlin": {"name": "Berlin Darkroom", "grade": "colorchannelmixer=rr=0.2:gg=0.4:bb=0.6,eq=contrast=1.6:brightness=-0.05", "bounce": 18, "flash": "0.30", "inv": 0.020, "hook": "BASEMENT VIBES"},
+    "neorave": {"name": "Neo-Rave Speed", "grade": "colorchannelmixer=rr=1.3:gg=0.8:bb=1.4,eq=contrast=1.4:saturation=1.3", "bounce": 30, "flash": "0.55", "inv": 0.045, "hook": "NEO-RAVE 164 BPM"},
+    "industrial": {"name": "Raw Concrete Industrial", "grade": "eq=contrast=1.50:saturation=0.0:brightness=-0.02", "bounce": 26, "flash": "0.65", "inv": 0.060, "hook": "RAW CONCRETE WEAPON"}
 }
 
 SUSPICIOUS_EXTENSIONS = {".app", ".pkg", ".dmg", ".command", ".sh", ".scpt", ".exe", ".bat", ".vbs", ".js", ".scr"}
-MAGIC_EXECUTABLE_SIGNATURES = [(b"\xcf\xfa\xed\xfe", "Mach-O 64-bit Binary"), (b"\xce\xfa\xed\xfe", "Mach-O 32-bit Binary"), (b"\xca\xfe\xba\xbe", "Mach-O Universal"), (b"MZ", "Windows PE Executable"), (b"\x7fELF", "Linux ELF Binary"), (b"#!", "Unix Shell Script")]
+MAGIC_EXECUTABLE_SIGNATURES = [
+    (b"\xcf\xfa\xed\xfe", "Mach-O 64-bit Binary"),
+    (b"\xce\xfa\xed\xfe", "Mach-O 32-bit Binary"),
+    (b"\xca\xfe\xba\xbe", "Mach-O Universal"),
+    (b"MZ", "Windows PE Executable"),
+    (b"\x7fELF", "Linux ELF Binary"),
+    (b"#!", "Unix Shell Script")
+]
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".aiff", ".aif", ".flac", ".m4a"}
 
 def calculate_sha256(filepath):
@@ -182,14 +201,14 @@ def inspect_file_security(filepath):
         try:
             st = os.stat(filepath)
             if st.st_mode & 0o111:
-                return {"safe": False, "threat_type": "EXECUTABLE_BIT_SET", "message": "🚨 Audio besitzt +x Rechte", "quarantine": True}
+                return {"safe": False, "threat_type": "EXECUTABLE_BIT_SET", "message": "🚨 Audio besitzt ausführbare Rechte (+x)", "quarantine": True}
         except Exception: pass
         try:
             with open(filepath, "rb") as f:
                 header = f.read(16)
                 for sig, desc in MAGIC_EXECUTABLE_SIGNATURES:
                     if header.startswith(sig):
-                        return {"safe": False, "threat_type": "SPOOFED_BINARY", "message": f"🚨 Code als Audio getarnt ({desc})", "quarantine": True}
+                        return {"safe": False, "threat_type": "SPOOFED_BINARY", "message": f"🚨 Schadcode getarnt als Audio ({desc})", "quarantine": True}
         except Exception as e: return {"safe": False, "threat_type": "READ_ERROR", "message": str(e), "quarantine": False}
 
     return {"safe": True, "threat_type": "CLEAN", "message": "🟢 Geprüft & Sicher (Natives Audio)", "has_quarantine": False, "sha256": calculate_sha256(filepath)}
@@ -331,24 +350,25 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention=True, f
     if render_mode == "cinema":
         pass1_data = measure_ebur128_pass1(audio, drop, dur)
         if pass1_data:
-            loud_norm = f",loudnorm=I=-14.0:LRA=7.0:TP=-1.0:measured_I={pass1_data.get('input_i', '-14.0')}:measured_TP={pass1_data.get('input_tp', '-1.0')}:measured_LRA={pass1_data.get('input_lra', '7.0')}:measured_thresh={pass1_data.get('input_thresh', '-24.0')}:offset={pass1_data.get('target_offset', '0.0')}:linear=true"
+            loud_norm = f",loudnorm=I=-14.0:LRA=7.0:TP=-1.0:measured_I={pass1_data.get('input_i', '-14.0')}:measured_TP={pass1_data.get('input_tp', '-1.0')}:measured_LRA={pass1_data.get('input_lra', '7.0')}:linear=true"
         else:
             loud_norm = ",loudnorm=I=-14.0:LRA=7.0:TP=-1.0:linear=true"
 
         audio_filter = f"{base_audio_fade}{retention_filter}{loud_norm}"
+        # Robustes Debanding und Phosphor Halation ohne ungültige Flags
         fg = (
             f"[0:v]fps=30,scale={scale_w}:{scale_h}:force_original_aspect_ratio=increase,"
             f"crop={target_w}:{target_h}:x='(in_w-out_w)/2':y='(in_h-out_h)/2+{pdata['bounce']}*lt(mod(t,{bd}),0.05)',"
-            f"format=yuv420p,deband=1:64:16:false,{pdata['grade']},"
+            f"format=yuv420p,deband=1:64:16:0,{pdata['grade']},"
             f"split=2[raw_base][glow_src];"
-            f"[glow_src]gblur=sigma=14:steps=2,colorchannelmixer=rr=1.20:gg=0.30:bb=0.30[glow_layer];"
-            f"[raw_base][glow_layer]blend=all_mode=addition:all_opacity=0.32,"
+            f"[glow_src]gblur=sigma=12:steps=2,colorchannelmixer=rr=1.15:gg=0.25:bb=0.25[glow_layer];"
+            f"[raw_base][glow_layer]blend=all_mode=addition:all_opacity=0.30,"
             f"eq=contrast='1.0+0.8*lt(mod(t,{bd}),0.05)':brightness='{pdata['flash']}*lt(mod(t,{bd}),0.05)':enable='eq(mod(floor(t/{bd}),4),0)',"
             f"colorchannelmixer=rr=1.35:gg=0.8:bb=0.9:enable='eq(mod(floor(t/{bd}),4),1)*lt(mod(t,{bd}),0.06)',"
             f"negate=enable='eq(mod(floor(t/{bd}),4),2)*lt(mod(t,{bd}),{pdata['inv']})',"
-            f"noise=alls=22:allf=t+u:enable='eq(mod(floor(t/{bd}),4),3)*lt(mod(t,{bd}),0.07)'{txt}[vout]"
+            f"noise=alls=20:allf=t+u:enable='eq(mod(floor(t/{bd}),4),3)*lt(mod(t,{bd}),0.07)'{txt}[vout]"
         )
-        video_codec_flags = ["-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-level", "4.2", "-tune", "film"]
+        video_codec_flags = ["-c:v", "libx264", "-preset", "slow", "-crf", "17", "-profile:v", "high", "-level", "4.1", "-pix_fmt", "yuv420p"]
     else:
         audio_filter = f"{base_audio_fade}{retention_filter}"
         fg = (
@@ -367,20 +387,35 @@ def render_teaser(audio, imgs, drop, hook, pdata, out_mp4, use_retention=True, f
         "-filter_complex", fg, "-map", "[vout]", "-map", "1:a", "-af", audio_filter
     ] + video_codec_flags + ["-c:a", "aac", "-b:a", "320k", "-ar", "44100", "-metadata", "comment=Rendered via TECH DUDE", out_mp4]
 
-    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=240)
+        if proc.returncode != 0:
+            err_lines = proc.stderr.strip().split('\n')
+            relevant_err = " | ".join(err_lines[-3:]) if err_lines else "FFmpeg Unbekannter Fehler"
+            STATUS["logs"].append(f"❌ [FFmpeg Crash] {relevant_err}")
+            STATUS["progress"] = 0
+    except subprocess.TimeoutExpired:
+        STATUS["logs"].append("❌ [FFmpeg Fehler] Timeout überschritten.")
+        STATUS["progress"] = 0
+    except Exception as e:
+        STATUS["logs"].append(f"❌ [System Fehler] {str(e)}")
+        STATUS["progress"] = 0
 
 def run_job(style_key, variants, custom_hook, use_retention, fmt_key="9:16", beats=16, custom_drop=None, custom_bpm=155.0, render_mode="turbo"):
     STATUS["progress"] = 10
     mode_label = "💎 CINEMA-MASTER (EBU R128)" if render_mode == "cinema" else "⚡ TURBO-DRAFT"
-    STATUS["logs"] = [f"[{APP_NAME}] Starte Engine im Modus: {mode_label} ({fmt_key} @ {custom_bpm:.1f} BPM)..."]
+    STATUS["logs"] = [f"[{APP_NAME}] Starte Render im Modus: {mode_label} ({fmt_key} @ {custom_bpm:.1f} BPM)..."]
     
     auds = sorted(glob.glob(os.path.join(VAULT, "*.mp3")) + glob.glob(os.path.join(VAULT, "*.wav")) + glob.glob(os.path.join(VAULT, "*.m4a")) + glob.glob(os.path.join(VAULT, "*.aiff")))
     if not auds:
-        STATUS["logs"].append("[FEHLER] Kein Audio im 'input_vault' gefunden!")
+        STATUS["logs"].append("❌ [FEHLER] Kein Audio im 'input_vault' gefunden!")
         STATUS["progress"] = 0
         return
         
-    audio = auds[0]
+    audio = SHARED_STATE.get("active_track_file", "")
+    if not audio or audio not in auds:
+        audio = auds[0]
+        
     pdata = PRESETS.get(style_key, PRESETS["warehouse"])
     active_hook = custom_hook.strip() if custom_hook and custom_hook.strip() else pdata["hook"]
     
@@ -421,7 +456,7 @@ def run_job(style_key, variants, custom_hook, use_retention, fmt_key="9:16", bea
     for idx, d in enumerate(drops):
         out_name = f"teaser_{int(time.time())}_v{idx + 1}_{fmt_key.replace(':', 'x')}_{render_mode}.mp4"
         out_path = os.path.join(EXPORT, out_name)
-        if render_mode == "cinema": STATUS["logs"].append(f"[Cinema-Master] Pass 1 & 2: Compositing, Halation & EBU R128 (-14 LUFS)...")
+        if render_mode == "cinema": STATUS["logs"].append(f"[Cinema-Master] Compositing, Halation & EBU R128 (-14 LUFS)...")
         else: STATUS["logs"].append(f"[FFmpeg] Turbo-Render {idx + 1}/{len(drops)} (Drop: {d:.2f}s)...")
             
         render_teaser(audio, imgs[:4], d, active_hook, pdata, out_path, use_retention, fmt_key, beats, custom_bpm, render_mode)
@@ -430,7 +465,7 @@ def run_job(style_key, variants, custom_hook, use_retention, fmt_key="9:16", bea
 
     STATUS["results"] = res
     STATUS["progress"] = 100
-    STATUS["logs"].append(f"[Erfolg] Teaser ({render_mode.upper()}) synchron gerendert! Video im Player geladen.")
+    STATUS["logs"].append(f"[Erfolg] Teaser ({render_mode.upper()}) synchron gerendert!")
     subprocess.Popen(["afplay", "/System/Library/Sounds/Glass.aiff"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 def clean_track_query(raw_title):
@@ -522,7 +557,15 @@ def clean_filename_heuristic(raw_name):
     name = re.sub(r'_\d+bpm', '', name, flags=re.IGNORECASE)
     name = re.sub(r'\s+', ' ', name.replace('_', ' ').replace('$', 's').strip())
     detected_genre = "Hard Techno"
-    for kw, g in {"schranz": "Schranz / Hard Techno", "acid": "Acid Techno (303)", "industrial": "Industrial Techno", "peak": "Peak Time / Driving", "raw": "Raw & Deep Techno", "neo": "Neo-Rave", "hard": "Hard Techno"}.items():
+    for kw, g in {
+        "schranz": "Schranz / Hard Techno",
+        "acid": "Acid Techno (303)",
+        "industrial": "Industrial Techno",
+        "hardgroove": "Hardgroove",
+        "neorave": "Neo-Rave",
+        "peak": "Peak Time / Driving",
+        "raw": "Raw & Deep Techno"
+    }.items():
         if kw in name.lower():
             detected_genre = g; break
     return name + ext, detected_genre
@@ -643,6 +686,8 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
 </head>
 <body id="dropTarget" class="w-screen h-screen overflow-hidden bg-[#0d0d10] text-zinc-200 flex flex-col transition-colors duration-150">
 
+  <div id="toast" class="fixed bottom-4 right-4 z-50 px-4 py-2.5 rounded-lg text-xs font-bold shadow-2xl transition-all duration-300 transform translate-y-8 opacity-0 pointer-events-none"></div>
+
   <header class="h-12 border-b border-white/[0.08] bg-[#141418] px-4 flex items-center justify-between shrink-0">
     <div class="flex items-center space-x-3">
       <div class="flex items-center space-x-1.5 mr-2">
@@ -653,7 +698,7 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
       <div class="flex items-center space-x-2">
         <span class="text-sm font-black tracking-wider text-red-500 font-tabular">{APP_NAME}</span>
         <span class="text-[10px] bg-red-950/80 text-red-400 border border-red-800/80 px-2 py-0.5 rounded font-bold">v{CURRENT_VERSION}</span>
-        <button id="aiBadgeBtn" onclick="toggleConfigModal()" class="text-[10px] bg-indigo-950/70 hover:bg-indigo-900/80 text-indigo-300 border border-indigo-700/60 px-2.5 py-0.5 rounded font-bold flex items-center space-x-1 transition cursor-pointer">
+        <button id="aiBadgeBtn" onclick="toggleConfigModal()" class="text-[10px] bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border border-white/[0.1] px-2.5 py-0.5 rounded font-bold flex items-center space-x-1 transition cursor-pointer">
           <span id="aiBadgeIcon">🧠</span><span id="aiBadgeText">Brain: Lädt...</span>
         </button>
       </div>
@@ -664,15 +709,15 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
       <button id="tabCleanerBtn" onclick="switchTab('cleaner')" class="text-zinc-400 hover:text-white px-4 py-1.5 rounded-md transition flex items-center space-x-1.5"><span>🧹</span><span>3. KI-Cleaner</span></button>
     </nav>
     <div class="flex items-center space-x-2 text-xs">
-      <button id="updBtn" onclick="checkUpdate()" class="px-2.5 py-1 bg-[#1c1c22] border border-white/[0.08] hover:border-red-500/60 text-zinc-300 rounded font-medium transition">🔄 Update suchen</button>
+      <button id="updBtn" onclick="checkUpdate()" class="px-2.5 py-1 bg-[#1c1c22] border border-white/[0.08] hover:border-red-500/60 text-zinc-300 rounded font-medium transition flex items-center space-x-1"><span>🔄</span><span id="updBtnText">Update suchen</span></button>
       <button onclick="fetch('/api/folder?t=vault')" class="px-2.5 py-1 bg-[#1c1c22] hover:bg-[#25252d] border border-white/[0.08] text-zinc-300 rounded font-medium transition">Vault</button>
       <button onclick="fetch('/api/folder?t=export')" class="px-2.5 py-1 bg-[#1c1c22] hover:bg-[#25252d] border border-white/[0.08] text-zinc-300 rounded font-medium transition">Export</button>
     </div>
   </header>
 
-  <div id="updBanner" class="hidden px-4 py-2 text-xs flex justify-between items-center bg-emerald-950/80 border-b border-emerald-700 text-emerald-300">
-    <span id="updMsg"></span>
-    <button onclick="installUpdate()" id="updInstBtn" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition">Jetzt installieren</button>
+  <div id="updBanner" class="hidden px-4 py-2 text-xs flex justify-between items-center bg-emerald-950/90 border-b border-emerald-700 text-emerald-200">
+    <span id="updMsg" class="font-semibold"></span>
+    <button onclick="installUpdate()" id="updInstBtn" class="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded font-bold transition shadow">Jetzt installieren</button>
   </div>
 
   <div id="configModal" class="hidden fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
@@ -684,7 +729,7 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
       <div class="space-y-2 text-xs">
         <label class="text-[11px] font-bold text-zinc-300 uppercase tracking-wider block">Google AI Studio API-Key:</label>
         <input type="password" id="geminiKeyInput" placeholder="AIzaSy..." class="w-full bg-black border border-white/[0.15] p-2.5 rounded-lg text-zinc-100 font-tabular text-xs focus:border-indigo-500 focus:outline-none">
-        <p class="text-[10px] text-zinc-400">Gesichert in ~/.techdude_config.json. Bei Ausfall schützt der Bunker-Cache automatisch.</p>
+        <p class="text-[10px] text-zinc-400">Gesichert in ~/.techdude_config.json. Überlebt alle Code-Updates auf dem Mac.</p>
       </div>
       <button onclick="saveApiKey()" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-xs rounded-lg transition uppercase tracking-wider">Key speichern & testen</button>
     </div>
@@ -694,12 +739,20 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
     <div id="tabVideo" class="col-span-12 grid grid-cols-12 h-full overflow-hidden">
       <aside class="col-span-5 xl:col-span-4 border-r border-white/[0.08] bg-[#121215] flex flex-col overflow-y-auto p-4 space-y-3">
         
-        <div class="pro-card-inset p-3 rounded-lg flex items-center justify-between">
-          <div class="truncate mr-2">
-            <div class="text-[10px] font-bold text-red-500 uppercase tracking-wider">🎧 Aktiver Master-Track</div>
-            <div id="trackNameDisplay" class="text-xs font-semibold text-zinc-100 truncate mt-0.5">Scanne Vault...</div>
+        <!-- INTERAKTIVES TRACK-DROPDOWN -->
+        <div class="pro-card-inset p-3 rounded-lg flex items-center justify-between border border-red-500/30">
+          <div class="truncate mr-2 w-full">
+            <div class="text-[10px] font-bold text-red-500 uppercase tracking-wider mb-1 flex items-center space-x-1">
+              <span>🎧</span><span>Aktiver Master-Track</span>
+            </div>
+            <select id="trackSelect" onchange="changeActiveTrack(this.value)" class="w-full bg-black border border-white/[0.15] p-2 rounded text-xs text-zinc-100 focus:outline-none focus:border-red-500 font-bold truncate cursor-pointer">
+                <option value="">Scanne Vault...</option>
+            </select>
           </div>
-          <span id="trackInfoDisplay" class="text-[11px] font-tabular bg-white/[0.06] text-zinc-300 px-2 py-1 rounded whitespace-nowrap">--:--</span>
+          <div class="flex flex-col items-end justify-center ml-2 shrink-0">
+            <span id="trackInfoDisplay" class="text-[11px] font-tabular bg-white/[0.06] text-zinc-300 px-2 py-1 rounded whitespace-nowrap mb-1">--:--</span>
+            <span id="trackBpmDisplay" class="text-[10px] font-bold text-zinc-500">-- BPM</span>
+          </div>
         </div>
 
         <div class="p-3 rounded-lg bg-gradient-to-r from-red-950/80 via-[#1f1214] to-[#16161a] border border-red-700/60 shadow-md flex items-center justify-between">
@@ -742,8 +795,17 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
             <select id="beatsSelect" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-xs text-zinc-200 focus:outline-none"><option value="12">12 Beats</option><option value="16" selected>16 Beats</option><option value="24">24 Beats</option></select>
           </div>
           <div class="pro-card p-2 rounded-lg space-y-1">
-            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">Style-Preset</label>
-            <select id="p" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-xs text-zinc-200 focus:outline-none"><option value="warehouse">Warehouse</option><option value="acid">Acid 303</option><option value="tribal">Cyber Tribal</option></select>
+            <label class="text-[10px] font-bold text-zinc-400 uppercase tracking-wider block">Style-Preset (8 Stile)</label>
+            <select id="p" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-xs text-zinc-200 focus:outline-none">
+              <option value="warehouse">Industrial Warehouse</option>
+              <option value="acid">Acid 303 Tunnel</option>
+              <option value="tribal">Y2K Cyber Tribal</option>
+              <option value="schranz">Schranz Distortion</option>
+              <option value="hardgroove">Hardgroove Minimal</option>
+              <option value="berlin">Berlin Darkroom</option>
+              <option value="neorave">Neo-Rave Speed</option>
+              <option value="industrial">Raw Concrete Industrial</option>
+            </select>
           </div>
         </div>
 
@@ -754,6 +816,7 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
           <div id="aiHookPills" class="flex flex-wrap gap-1 text-[10px]">
             <button onclick="setHook('UNRELEASED ID?')" class="px-1.5 py-0.5 bg-white/[0.06] hover:bg-red-950 text-zinc-300 rounded">ID?</button>
             <button onclick="setHook('160 BPM ACID PRESSURE')" class="px-1.5 py-0.5 bg-white/[0.06] hover:bg-red-950 text-zinc-300 rounded">ACID</button>
+            <button onclick="setHook('165 BPM SCHRANZ DROP')" class="px-1.5 py-0.5 bg-white/[0.06] hover:bg-red-950 text-zinc-300 rounded">SCHRANZ</button>
           </div>
           <input type="text" id="hook" placeholder="POV: FIRST TIME VERKNIPT" class="w-full bg-black border border-white/[0.1] p-2 rounded text-xs text-zinc-100 focus:outline-none focus:border-red-500 font-medium">
         </div>
@@ -827,137 +890,200 @@ HTML = f"""<!DOCTYPE html><html class="dark"><head><meta charset="UTF-8">
 
     <div id="tabCleaner" class="col-span-12 grid grid-cols-12 h-full overflow-hidden hidden">
       <aside class="col-span-4 border-r border-white/[0.08] bg-[#121215] flex flex-col p-4 space-y-3.5 overflow-y-auto">
+        
         <div class="space-y-1.5">
           <label class="text-[11px] font-bold text-zinc-400 uppercase tracking-wider">Ziel-Ordner zum Bereinigen:</label>
-          <select id="cleanerFolderSelect" onchange="changeCleanerFolder(this.value)" class="w-full bg-black border border-white/[0.1] p-2 rounded-lg text-xs text-zinc-200"><option value="~/Downloads">📥 Downloads-Ordner</option><option value="~/Music">🎵 Musik-Ordner</option><option value="input_vault">📦 Input Vault</option></select>
-          <input type="text" id="customFolderPath" placeholder="/Pfad/zum/Ordner" class="w-full bg-black border border-white/[0.1] p-2 rounded-lg text-xs text-zinc-200 font-tabular">
+          <div class="flex items-center space-x-2">
+            <select id="cleanerFolderSelect" onchange="changeCleanerFolder(this.value)" class="w-1/3 bg-black border border-white/[0.1] p-2 rounded-lg text-xs text-zinc-200 focus:outline-none">
+              <option value="~/Downloads">📥 Downloads</option>
+              <option value="~/Music">🎵 Music</option>
+              <option value="input_vault">📦 Vault</option>
+            </select>
+            <input type="text" id="customFolderPath" placeholder="/Pfad/zum/Ordner" class="flex-1 bg-black border border-white/[0.1] p-2 rounded-lg text-xs text-zinc-200 font-tabular focus:outline-none">
+            <button onclick="pickFolder()" class="px-3 py-2 bg-white/[0.06] hover:bg-white/[0.1] border border-white/[0.1] rounded-lg text-xs" title="Ordner auf dem Mac durchsuchen">📂</button>
+          </div>
         </div>
-        <button onclick="startCleanerScan()" id="cleanScanBtn" class="w-full py-2.5 bg-[#FF453A] hover:bg-red-500 text-white rounded-lg font-bold text-xs uppercase tracking-wider transition">🛡️ Ordner prüfen & Scannen</button>
+
+        <div class="flex p-0.5 bg-[#0a0a0c] rounded-lg border border-white/[0.08] text-[10px] font-bold mt-1">
+          <button id="clnMode_malware" onclick="setCleanerMode('malware')" class="segmented-active px-1 py-1.5 rounded w-1/3 transition">🛡️ Viren</button>
+          <button id="clnMode_dupes" onclick="setCleanerMode('dupes')" class="text-zinc-400 hover:text-white px-1 py-1.5 rounded w-1/3 transition">👯 Duplikate</button>
+          <button id="clnMode_edit" onclick="setCleanerMode('edit')" class="text-zinc-400 hover:text-white px-1 py-1.5 rounded w-1/3 transition">🏷️ Tracks Editieren</button>
+        </div>
+
+        <button onclick="startCleanerScan()" id="cleanScanBtn" class="w-full py-2.5 bg-[#FF453A] hover:bg-red-500 text-white rounded-lg font-bold text-xs uppercase tracking-wider transition">Ordner Scannen & Prüfen</button>
+        
         <div id="cleanerBanner" class="p-3 rounded-lg border text-xs bg-zinc-900 border-white/[0.08] text-zinc-300 space-y-1"><div class="font-bold text-zinc-200">Zero-RAM Sentinel Status</div><div id="cleanerBannerText" class="text-[11px] text-zinc-400">Noch kein Scan ausgeführt.</div></div>
         <div id="duplicateSection" class="hidden bg-amber-950/30 border border-amber-800/60 p-3 rounded-lg space-y-2 text-xs"><div class="flex justify-between items-center font-bold text-amber-400"><span>⚠️ DUPLIKATE (<span id="dupCount">0</span>)</span></div><div id="duplicateList" class="space-y-1.5 max-h-40 overflow-y-auto"></div></div>
-        <div class="pt-2"><button id="cleanerExecBtn" onclick="executeCleanAndRename()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg transition uppercase tracking-wider">⚡ Ausgewählte bereinigen & Taggen</button></div>
+        
+        <div class="pt-2">
+          <button id="cleanerExecBtn" onclick="executeCleanAndRename()" class="w-full py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-lg transition uppercase tracking-wider hidden">⚡ Ausgewählte Taggen</button>
+        </div>
       </aside>
       <section class="col-span-8 bg-[#0b0b0e] flex flex-col p-4 space-y-3 overflow-hidden">
-        <div class="flex justify-between items-center border-b border-white/[0.06] pb-2"><span class="text-xs font-bold uppercase tracking-wider text-zinc-400">Vorher-Nachher Vorschau</span><button onclick="toggleSelectAllCleaner()" class="text-zinc-400 hover:text-white text-xs underline">Alle an/abwählen</button></div>
+        <div class="flex justify-between items-center border-b border-white/[0.06] pb-2"><span class="text-xs font-bold uppercase tracking-wider text-zinc-400">Scanner Vorschau-Matrix</span><button onclick="toggleSelectAllCleaner()" class="text-zinc-400 hover:text-white text-[11px] underline">Alle an/abwählen</button></div>
         <div id="cleanerRows" class="flex-1 overflow-y-auto space-y-2 pr-1"></div>
       </section>
     </div>
   </main>
 
 <script>
-let userChangedBpm = false, currentCleanerItems = [], currentWaveformPoints = [], currentDropSec = 2.30, currentDurationSec = 180.0, activeRenderMode = "turbo";
+let userChangedBpm = false, currentCleanerItems = [], currentWaveformPoints = [], currentDropSec = 2.30, currentDurationSec = 180.0, activeRenderMode = "turbo", currentCleanerMode = "malware";
 
-function setHook(t){{ document.getElementById('hook').value = t; }}
-function selectRenderMode(mode){{
+function showToast(msg, type='info') {
+  const t = document.getElementById('toast');
+  t.innerText = msg;
+  t.className = `fixed bottom-4 right-4 z-50 px-4 py-2.5 rounded-lg text-xs font-bold shadow-2xl transition-all duration-300 transform translate-y-0 opacity-100 ${{type === 'error' ? 'bg-red-600 text-white' : type === 'success' ? 'bg-emerald-600 text-white' : 'bg-zinc-800 text-zinc-100 border border-white/10'}}`;
+  setTimeout(() => {
+    t.className = 'fixed bottom-4 right-4 z-50 px-4 py-2.5 rounded-lg text-xs font-bold shadow-2xl transition-all duration-300 transform translate-y-8 opacity-0 pointer-events-none';
+  }, 3500);
+}
+
+async function fetchApiKeyStatus() {
+    try {
+        const res = await(await fetch('/api/config')).json();
+        const badge = document.getElementById('aiBadgeBtn');
+        if (res.has_key) {
+            badge.className = 'text-[10px] bg-indigo-950/90 hover:bg-indigo-900 text-indigo-200 border border-indigo-700/60 px-2.5 py-0.5 rounded font-bold flex items-center space-x-1 transition cursor-pointer';
+            document.getElementById('aiBadgeText').innerText = 'Brain: Online';
+        } else {
+            badge.className = 'text-[10px] bg-zinc-900 hover:bg-zinc-800 text-zinc-400 border border-white/[0.1] px-2.5 py-0.5 rounded font-bold flex items-center space-x-1 transition cursor-pointer';
+            document.getElementById('aiBadgeText').innerText = 'Brain: Offline (Bunker)';
+        }
+    } catch (e) {}
+}
+window.addEventListener('DOMContentLoaded', () => { fetchApiKeyStatus(); });
+
+function setHook(t){ document.getElementById('hook').value = t; }
+function selectRenderMode(mode){
   activeRenderMode = mode; document.getElementById('renderModeSelect').value = mode;
   const bTurbo = document.getElementById('modeBtn_turbo'), bCinema = document.getElementById('modeBtn_cinema'), badge = document.getElementById('renderModeBadge');
-  if(mode === 'cinema'){{
+  if(mode === 'cinema'){
     bCinema.className = 'segmented-active py-1.5 rounded transition'; bTurbo.className = 'text-zinc-400 hover:text-white py-1.5 rounded transition';
     badge.innerText = '💎 Cinema-Master'; badge.className = 'text-[10px] font-bold text-red-400 font-tabular bg-red-950/60 px-2 py-0.5 rounded border border-red-900/60';
-  }} else {{
+  } else {
     bTurbo.className = 'segmented-active py-1.5 rounded transition'; bCinema.className = 'text-zinc-400 hover:text-white py-1.5 rounded transition';
     badge.innerText = '⚡ Turbo'; badge.className = 'text-[10px] font-bold text-amber-400 font-tabular bg-amber-950/60 px-2 py-0.5 rounded border border-amber-900/60';
-  }}
-}}
+  }
+}
 
-function selectFormat(fmt){{
+function selectFormat(fmt){
   document.getElementById('fmtSelect').value = fmt;
-  ['9_16', '1_1', '16_9'].forEach(k => {{
+  ['9_16', '1_1', '16_9'].forEach(k => {
     document.getElementById('fmtBtn_' + k).className = (k === fmt.replace(':', '_')) ? 'segmented-active py-1.5 rounded transition' : 'text-zinc-400 hover:text-white py-1.5 rounded transition';
-  }});
-}}
+  });
+}
 
-function nudgeBpm(delta){{ updateBpm(Math.max(140, Math.min(168, (parseInt(document.getElementById('bpmNumber').value) || 155) + delta))); }}
-function updateBpm(val){{ userChangedBpm = true; document.getElementById('bpmSlider').value = val; document.getElementById('bpmNumber').value = val; document.getElementById('bpmDisplay').innerText = val + ' BPM'; }}
+function nudgeBpm(delta){ updateBpm(Math.max(140, Math.min(168, (parseInt(document.getElementById('bpmNumber').value) || 155) + delta))); }
+function updateBpm(val){ userChangedBpm = true; document.getElementById('bpmSlider').value = val; document.getElementById('bpmNumber').value = val; document.getElementById('bpmDisplay').innerText = val + ' BPM'; }
 
-function switchTab(t){{
-  ['video', 'crate', 'cleaner'].forEach(tab => {{
+function switchTab(t){
+  ['video', 'crate', 'cleaner'].forEach(tab => {
     document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1)).classList.toggle('hidden', tab !== t);
     document.getElementById('tab' + tab.charAt(0).toUpperCase() + tab.slice(1) + 'Btn').className = (tab === t) ? 'segmented-active px-4 py-1.5 rounded-md transition flex items-center space-x-1.5' : 'text-zinc-400 hover:text-white px-4 py-1.5 rounded-md transition flex items-center space-x-1.5';
-  }});
-}}
+  });
+}
 
-function drawWaveform(points, dropSec, totalSec){{
+function drawWaveform(points, dropSec, totalSec){
   const svgGroup = document.getElementById('waveformBars');
   if(!points || points.length === 0) points = Array.from({{length: 100}}, () => 0.15);
   svgGroup.innerHTML = points.map((p, i) => `<rect x="${{i}}" y="${{20 - (Math.max(3, Math.round(p * 36)) / 2)}}" width="0.75" height="${{Math.max(3, Math.round(p * 36))}}" fill="rgba(255,255,255,0.22)" rx="0.3"></rect>`).join('');
-  if(totalSec > 0){{
+  if(totalSec > 0){
     document.getElementById('dropLine').style.left = Math.max(2, Math.min(96, (dropSec / totalSec) * 100)) + '%';
     document.getElementById('dropIndicatorLabel').innerText = `Drop: ${{dropSec.toFixed(2)}}s / ${{totalSec.toFixed(0)}}s`;
-  }}
-}}
+  }
+}
 
-function handleWaveformClick(e){{
+function handleWaveformClick(e){
   const rect = document.getElementById('waveformContainer').getBoundingClientRect();
   const newDrop = parseFloat((Math.max(0.01, Math.min(0.98, (e.clientX - rect.left) / rect.width)) * currentDurationSec).toFixed(2));
   currentDropSec = newDrop; document.getElementById('customDropInput').value = newDrop;
   drawWaveform(currentWaveformPoints, currentDropSec, currentDurationSec);
   document.getElementById('logs').innerText = `Drop-Marker manuell gesetzt auf: ${{newDrop.toFixed(2)}}s`;
-}}
+}
 
-async function updateTrackInfo(){{
+async function changeActiveTrack(val){
+    await fetch('/api/set_active_track', {{method: 'POST', body: JSON.stringify({{filename: val}})}});
+    updateTrackInfo();
+}
+
+async function updateTrackInfo(){
   try{{
     const res = await(await fetch('/api/active_track')).json();
     if(res.processing) return;
-    if(res.has_audio){{
-      document.getElementById('trackNameDisplay').innerText = res.filename;
-      document.getElementById('trackInfoDisplay').innerText = res.duration_str + ' • ' + Math.round(res.detected_bpm) + ' BPM';
+    
+    const sel = document.getElementById('trackSelect');
+    if(res.has_audio){
+      if(sel.options.length !== res.vault_files.length || (sel.options.length > 0 && sel.options[0].value !== res.vault_files[0])) {{
+          sel.innerHTML = res.vault_files.map(f => `<option value="${{f}}" ${{f === res.filename ? 'selected' : ''}}>${{f}}</option>`).join('');
+      }} else {{
+          sel.value = res.filename;
+      }}
+      document.getElementById('trackInfoDisplay').innerText = res.duration_str;
+      document.getElementById('trackBpmDisplay').innerText = Math.round(res.detected_bpm) + ' BPM';
+      
       currentDurationSec = res.duration_sec || 180.0;
       currentDropSec = document.getElementById('customDropInput').value ? parseFloat(document.getElementById('customDropInput').value) : (res.drop_sec || 2.30);
       currentWaveformPoints = res.waveform || [];
       drawWaveform(currentWaveformPoints, currentDropSec, currentDurationSec);
       if(!userChangedBpm && res.detected_bpm) updateBpm(Math.round(res.detected_bpm)); userChangedBpm = false;
-    }} else {{ document.getElementById('trackNameDisplay').innerText = 'Kein Track im Vault'; document.getElementById('trackInfoDisplay').innerText = '--:--'; drawWaveform([], 2.30, 180); }}
+    }} else {{ 
+      sel.innerHTML = '<option value="">Kein Track im Vault</option>';
+      document.getElementById('trackInfoDisplay').innerText = '--:--'; 
+      document.getElementById('trackBpmDisplay').innerText = '-- BPM';
+      drawWaveform([], 2.30, 180); 
+    }}
   }}catch(e){{}}
-}}
+}
 updateTrackInfo(); setInterval(updateTrackInfo, 3500);
 
-function toggleConfigModal(){{ document.getElementById('configModal').classList.toggle('hidden'); }}
-async function saveApiKey(){{
+function toggleConfigModal(){ document.getElementById('configModal').classList.toggle('hidden'); }
+async function saveApiKey(){
   const res = await(await fetch('/api/config', {{ method: 'POST', body: JSON.stringify({{ gemini_api_key: document.getElementById('geminiKeyInput').value.trim() }}) }})).json();
-  alert(res.message); toggleConfigModal();
-}}
+  showToast(res.message, res.status === 'ok' ? 'success' : 'error');
+  toggleConfigModal(); fetchApiKeyStatus();
+}
 
-async function fetchAiViralHooks(){{
+async function fetchAiViralHooks(){
   const btn = document.getElementById('aiHookScoutBtn'); btn.disabled = true; btn.innerHTML = '<span>⏳</span><span>Scoute...</span>';
   try {{
-    const res = await(await fetch('/api/gemini/generate_hooks', {{ method: 'POST', body: JSON.stringify({{ track: document.getElementById('trackNameDisplay').innerText, bpm: parseFloat(document.getElementById('bpmNumber').value) || 155, style: document.getElementById('p').value || 'warehouse' }}) }})).json();
+    const trackName = document.getElementById('trackSelect').value || 'Unknown Track';
+    const res = await(await fetch('/api/gemini/generate_hooks', {{ method: 'POST', body: JSON.stringify({{ track: trackName, bpm: parseFloat(document.getElementById('bpmNumber').value) || 155, style: document.getElementById('p').value || 'warehouse' }}) }})).json();
     if(res.hooks && res.hooks.length > 0){{
       document.getElementById('aiHookPills').innerHTML = res.hooks.map(h => `<button onclick="setHook('${{h.replace(/'/g, "\\'")}}')" class="px-2 py-0.5 bg-indigo-950/90 hover:bg-red-950 text-indigo-200 border border-indigo-700/60 rounded text-[10px] font-bold">${{h}}</button>`).join('');
       setHook(res.hooks[0]);
     }}
-  }} catch(e){{ alert('Fehler: ' + e); }}
+  }} catch(e){{ showToast('Fehler beim KI-Scouting: ' + e, 'error'); }}
   btn.disabled = false; btn.innerHTML = '<span>🧠</span><span>KI-Scout</span>';
-}}
+}
 
-async function aiParseCrateNotes(){{
+async function aiParseCrateNotes(){
   const ta = document.getElementById('crateText'), raw = ta.value.trim();
-  if(!raw) return alert('Bitte Text einfügen!');
+  if(!raw) return showToast('Bitte Text in die Tracklist einfügen!', 'error');
   const btn = document.getElementById('aiParseNotesBtn'); btn.disabled = true; btn.innerHTML = '<span>⏳</span><span>Entwirre...</span>';
   try {{
     const res = await(await fetch('/api/gemini/parse_notes', {{ method: 'POST', body: JSON.stringify({{ raw_text: raw }}) }})).json();
-    if(res.parsed && res.parsed.length > 0) ta.value = res.parsed.join('\\n');
+    if(res.parsed && res.parsed.length > 0) ta.value = res.parsed.join('\n');
   }} catch(e){{}}
   btn.disabled = false; btn.innerHTML = '<span>🧠</span><span>KI-Entwirrer</span>';
-}}
+}
 
-function loadVideoToStage(streamUrl, filename){{
+function loadVideoToStage(streamUrl, filename){
   const v = document.getElementById('stageVideo');
   v.pause(); v.src = streamUrl; v.load();
   v.classList.remove('hidden'); document.getElementById('stagePlaceholder').classList.add('hidden');
   document.getElementById('stagePlayBtn').classList.remove('hidden'); document.getElementById('stageBadge').innerText = filename || 'Loop aktiv';
   v.play().catch(() => {{}});
-}}
+}
 
-function unloadVideoPlayer(){{
+function unloadVideoPlayer(){
   const v = document.getElementById('stageVideo'); v.pause(); v.src = ''; v.classList.add('hidden');
   document.getElementById('stagePlaceholder').classList.remove('hidden'); document.getElementById('stagePlayBtn').classList.add('hidden'); document.getElementById('stageBadge').innerText = 'Bereit';
-}}
+}
 
-function toggleStageVideo(){{
+function toggleStageVideo(){
   const v = document.getElementById('stageVideo'), pb = document.getElementById('stagePlayBtn');
   if(v.paused){{ v.play(); pb.innerText = '⏸'; }} else {{ v.pause(); pb.innerText = '▶'; }}
-}}
+}
 
 const body = document.getElementById('dropTarget');
 ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => body.addEventListener(evt, e => {{ e.preventDefault(); e.stopPropagation(); }}, false));
@@ -970,17 +1096,17 @@ body.addEventListener('drop', async e => {{
   await fetch('/api/upload', {{ method: 'POST', body: formData }}); updateTrackInfo();
 }});
 
-async function triggerAutopilot(){{
+async function triggerAutopilot(){
   document.getElementById('btn').disabled = document.getElementById('btnAuto').disabled = true;
   await fetch('/api/autopilot', {{ method: 'POST', body: JSON.stringify({{ bpm: parseFloat(document.getElementById('bpmNumber').value) || 155, mode: document.getElementById('renderModeSelect').value || 'turbo' }}) }}); poll();
-}}
+}
 
-async function startRender(){{
+async function startRender(){
   document.getElementById('btn').disabled = document.getElementById('btnAuto').disabled = true;
   await fetch('/api/render', {{ method: 'POST', body: JSON.stringify({{ p: document.getElementById('p').value, v: 1, hook: document.getElementById('hook').value, retention: document.getElementById('retention').checked, fmt: document.getElementById('fmtSelect').value, beats: parseInt(document.getElementById('beatsSelect').value), bpm: parseFloat(document.getElementById('bpmNumber').value) || 155, mode: document.getElementById('renderModeSelect').value || 'turbo', drop: document.getElementById('customDropInput').value ? parseFloat(document.getElementById('customDropInput').value) : null }}) }}); poll();
-}}
+}
 
-async function poll(){{
+async function poll(){
   const d = await(await fetch('/api/status')).json();
   document.getElementById('pbar').style.width = d.progress + '%'; document.getElementById('ptxt').innerText = d.progress + '%';
   document.getElementById('logs').innerHTML = d.logs.map(l => '<div>' + l + '</div>').join('');
@@ -995,10 +1121,10 @@ async function poll(){{
         </div>
       </div>`).join('');
   }}
-  if(d.progress === 100 || (d.progress === 0 && d.logs.some(l => l.includes('FEHLER')))){{ document.getElementById('btn').disabled = document.getElementById('btnAuto').disabled = false; }} else setTimeout(poll, 700);
-}}
+  if(d.progress === 100 || (d.progress === 0 && d.logs.some(l => l.includes('FEHLER') || l.includes('Crash')))){{ document.getElementById('btn').disabled = document.getElementById('btnAuto').disabled = false; }} else setTimeout(poll, 700);
+}
 
-async function startCrateScan(){{
+async function startCrateScan(){
   const text=document.getElementById('crateText').value; if(!text.trim()) return;
   const b=document.getElementById('crateBtn'); b.disabled=true; b.innerText='⏳ Scanne...';
   try{{
@@ -1009,18 +1135,33 @@ async function startCrateScan(){{
         <div><div class="font-bold ${{it.found?'text-zinc-100':'text-red-400'}}">${{it.found?'✅':'❌'}} ${{it.query}}</div><div class="text-[10px] text-zinc-400 truncate max-w-lg mt-0.5">${{it.path || 'Fehlt'}}</div></div>
         <div class="flex items-center space-x-1.5">
           <span class="px-2 py-0.5 rounded text-[10px] font-bold font-tabular ${{it.found?'bg-emerald-950 text-emerald-300 border border-emerald-800':'bg-zinc-800 text-zinc-500'}}">${{it.format}}</span>
-          ${{it.found?`<button onclick="fetch('/api/copy_vault?path=${{encodeURIComponent(it.path)}}');alert('✓ In Vault!');updateTrackInfo();" class="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.1] rounded text-[10px] text-zinc-300 transition">In Vault</button>`:''}}
+          ${{it.found?`<button onclick="fetch('/api/copy_vault?path=${{encodeURIComponent(it.path)}}');showToast('✓ In Vault kopiert!','success');updateTrackInfo();" class="px-2 py-1 bg-white/[0.06] hover:bg-white/[0.1] rounded text-[10px] text-zinc-300 transition">In Vault</button>`:''}}
         </div>
       </div>`).join('');
   }}catch(e){{}} b.disabled=false; b.innerText='🔍 Tracks suchen';
-}}
+}
 
-async function exportM3U8(){{
+async function exportM3U8(){
   const res=await(await fetch('/api/crate_export',{{method:'POST',body:JSON.stringify({{name: document.getElementById('plName').value}})}})).json();
-  if(res.status==='ok') alert(`✓ Gespeichert: ${{res.filename}}`);
+  if(res.status==='ok') showToast(`✓ Gespeichert: ${{res.filename}}`, 'success');
+}
+
+function changeCleanerFolder(val){ document.getElementById('customFolderPath').value = val === 'input_vault' ? '' : val; }
+
+function setCleanerMode(mode) {{
+    currentCleanerMode = mode;
+    ['malware', 'dupes', 'edit'].forEach(m => {{
+        document.getElementById('clnMode_' + m).className = (m === mode) ? 'segmented-active px-1 py-1.5 rounded w-1/3 transition' : 'text-zinc-400 hover:text-white px-1 py-1.5 rounded w-1/3 transition';
+    }});
+    renderCleanerView();
 }}
 
-function changeCleanerFolder(val){{ document.getElementById('customFolderPath').value = val === 'input_vault' ? '' : val; }}
+async function pickFolder() {{
+    try {{
+        const res = await(await fetch('/api/pick_folder')).json();
+        if(res.path) {{ document.getElementById('customFolderPath').value = res.path; }}
+    }} catch(e) {{}}
+}}
 
 async function startCleanerScan(){{
   const folder = document.getElementById('customFolderPath').value || document.getElementById('cleanerFolderSelect').value;
@@ -1028,38 +1169,112 @@ async function startCleanerScan(){{
   try {{
     const res = await(await fetch('/api/cleaner/scan', {{ method: 'POST', body: JSON.stringify({{ folder }}) }})).json();
     currentCleanerItems = res.items || [];
-    document.getElementById('cleanerBanner').className = res.threats_found > 0 ? 'p-3 rounded-lg border text-xs bg-red-950/80 border-red-700 text-red-200 space-y-1' : 'p-3 rounded-lg border text-xs bg-emerald-950/60 border-emerald-700/60 text-emerald-300 space-y-1';
+    document.getElementById('cleanerBanner').className = res.threats_found > 0 ? 'p-3 rounded-lg border text-xs bg-red-950/80 border-red-700 text-red-200 space-y-1 mt-2' : 'p-3 rounded-lg border text-xs bg-emerald-950/60 border-emerald-700/60 text-emerald-300 space-y-1 mt-2';
     document.getElementById('cleanerBannerText').innerHTML = res.threats_found > 0 ? `🚨 <strong>WARNUNG:</strong> ${{res.threats_found}} Bedrohung(en) isoliert!` : `🟢 <strong>SENTINEL CLEAN:</strong> Alle ${{res.total_scanned}} Dateien geprüft.`;
     
-    document.getElementById('duplicateSection').classList.toggle('hidden', !(res.duplicates && res.duplicates.length > 0));
     document.getElementById('dupCount').innerText = res.duplicates ? res.duplicates.length : 0;
+    renderCleanerView();
+  }} catch(e){{}} btn.disabled = false; btn.innerText = 'Ordner Scannen & Prüfen';
+}}
+
+function renderCleanerView() {{
+    if(!currentCleanerItems || currentCleanerItems.length === 0) return;
     
-    document.getElementById('cleanerRows').innerHTML = res.items.map((it, idx) => `
-      <div class="p-3 rounded-lg ${{it.safe ? 'pro-card' : 'bg-red-950/40 border border-red-700'}} space-y-2 text-xs">
-        <div class="flex justify-between items-center">
-          <div class="flex items-center space-x-2 truncate">
-            ${{it.safe ? `<input type="checkbox" id="chk_${{idx}}" ${{it.selected ? 'checked' : ''}} onchange="currentCleanerItems[${{idx}}].selected=this.checked" class="w-4 h-4 accent-red-600">` : '<span class="text-red-500 font-bold">🚨 BLOCKIERT</span>'}}
-            <span class="text-zinc-300 font-medium truncate max-w-md">${{it.original_name}}</span>
-          </div>
-          <div class="flex items-center space-x-1.5">
-            <span class="px-2 py-0.5 rounded text-[10px] font-bold font-tabular bg-white/[0.08] text-zinc-300">${{it.format}}</span>
-            ${{it.safe ? `<button onclick="fetch('/api/bridge/to_teaser?path=${{encodeURIComponent(it.path)}}',{{method:'POST'}});switchTab('video');" class="px-2 py-0.5 bg-red-950 text-red-300 border border-red-800 rounded text-[10px] font-bold">🎬 Teaser</button>` : `<button onclick="trashDuplicate('${{encodeURIComponent(it.path)}}', this)" class="px-2 py-0.5 bg-red-700 hover:bg-red-600 text-white rounded font-bold text-[10px]">Löschen</button>`}}
-          </div>
-        </div>
-        ${{it.safe ? `<div class="grid grid-cols-12 gap-2 pt-1 border-t border-white/[0.06]"><div class="col-span-8"><input type="text" value="${{it.clean_name}}" oninput="currentCleanerItems[${{idx}}].clean_name=this.value" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-zinc-100 text-xs font-tabular"></div><div class="col-span-4"><input type="text" value="${{it.genre}}" oninput="currentCleanerItems[${{idx}}].genre=this.value" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-zinc-100 text-xs font-medium"></div></div>` : `<div class="text-[11px] text-red-400 font-bold">${{it.threat_msg}}</div>`}}
-      </div>`).join('');
-  }} catch(e){{}} btn.disabled = false; btn.innerText = '🛡️ Ordner prüfen & Scannen';
+    document.getElementById('duplicateSection').classList.toggle('hidden', currentCleanerMode !== 'dupes');
+    document.getElementById('cleanerExecBtn').classList.toggle('hidden', currentCleanerMode !== 'edit');
+    
+    let html = '';
+    if(currentCleanerMode === 'malware') {{
+        html = currentCleanerItems.map((it, idx) => `
+          <div class="p-3 rounded-lg ${{it.safe ? 'pro-card' : 'bg-red-950/40 border border-red-700'}} space-y-2 text-xs">
+            <div class="flex justify-between items-center">
+              <div class="flex items-center space-x-2 truncate">
+                ${{it.safe ? '🟢' : '🚨'}} <span class="text-zinc-300 font-medium truncate max-w-md">${{it.original_name}}</span>
+              </div>
+              <span class="px-2 py-0.5 rounded text-[10px] font-bold font-tabular bg-white/[0.08] text-zinc-300">${{it.format}}</span>
+            </div>
+            ${{!it.safe ? `<div class="text-[11px] text-red-400 font-bold">${{it.threat_msg}}</div>` : ''}}
+          </div>`).join('');
+    }} else if (currentCleanerMode === 'edit') {{
+        html = currentCleanerItems.filter(i => i.safe).map((it, idx) => `
+          <div class="p-3 rounded-lg pro-card space-y-2 text-xs">
+            <div class="flex justify-between items-center">
+              <div class="flex items-center space-x-2 truncate">
+                <input type="checkbox" id="chk_${{idx}}" ${{it.selected ? 'checked' : ''}} onchange="currentCleanerItems[${{idx}}].selected=this.checked" class="w-4 h-4 accent-red-600">
+                <span class="text-zinc-300 font-medium truncate max-w-md">${{it.original_name}}</span>
+              </div>
+              <button onclick="fetch('/api/bridge/to_teaser?path=${{encodeURIComponent(it.path)}}',{{method:'POST'}});switchTab('video');" class="px-2 py-0.5 bg-red-950 text-red-300 border border-red-800 rounded text-[10px] font-bold transition hover:bg-red-600 hover:text-white">🎬 Zu Tab 1 (Teaser)</button>
+            </div>
+            <div class="grid grid-cols-12 gap-2 pt-1 border-t border-white/[0.06]">
+               <div class="col-span-8"><input type="text" value="${{it.clean_name}}" oninput="currentCleanerItems[${{idx}}].clean_name=this.value" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-zinc-100 text-xs font-tabular focus:border-red-500 focus:outline-none"></div>
+               <div class="col-span-4"><input type="text" value="${{it.genre}}" oninput="currentCleanerItems[${{idx}}].genre=this.value" class="w-full bg-black border border-white/[0.1] p-1.5 rounded text-zinc-100 text-xs font-medium focus:border-red-500 focus:outline-none"></div>
+            </div>
+          </div>`).join('');
+    }} else if (currentCleanerMode === 'dupes') {{
+         html = `<div class="text-center text-zinc-400 text-[11px] p-6 font-bold uppercase tracking-wider">Erkannte Duplikate werden in der linken Spalte gelistet.</div>`;
+    }}
+    document.getElementById('cleanerRows').innerHTML = html;
 }}
 
 function toggleSelectAllCleaner(){{ const v = currentCleanerItems.find(i=>i.safe) ? !currentCleanerItems.find(i=>i.safe).selected : true; currentCleanerItems.forEach((it, idx) => {{ if(it.safe){{ it.selected = v; const el = document.getElementById('chk_' + idx); if(el) el.checked = v; }} }}); }}
-async function trashDuplicate(pathEnc, btn){{ btn.disabled = true; const res = await(await fetch('/api/cleaner/trash?path=' + pathEnc, {{ method: 'POST' }})).json(); alert(res.message); startCleanerScan(); }}
+async function trashDuplicate(pathEnc, btn){{ btn.disabled = true; const res = await(await fetch('/api/cleaner/trash?path=' + pathEnc, {{ method: 'POST' }})).json(); showToast(res.message, res.status==='ok'?'success':'error'); startCleanerScan(); }}
 async function executeCleanAndRename(){{
   const mods = currentCleanerItems.filter(i => i.safe && i.selected).map(i => ({{ path: i.path, new_name: i.clean_name, genre: i.genre }})); if(mods.length === 0) return;
-  const res = await(await fetch('/api/cleaner/execute', {{ method: 'POST', body: JSON.stringify({{ modifications: mods }}) }})).json(); alert(`✓ ${{res.renamed_count}} Dateien bereinigt!`); startCleanerScan();
+  const res = await(await fetch('/api/cleaner/execute', {{ method: 'POST', body: JSON.stringify({{ modifications: mods }}) }})).json(); showToast(`✓ ${{res.renamed_count}} Dateien bereinigt!`, 'success'); startCleanerScan();
 }}
-async function checkUpdate(){{}}
-async function installUpdate(){{}}
+
+// ==============================================================================
+// 1-KLICK LIVE UPDATER LOGIK (REPARIERT)
+// ==============================================================================
+async function checkUpdate(){{
+  const btn = document.getElementById('updBtn'), btnTxt = document.getElementById('updBtnText');
+  btn.disabled = true; btnTxt.innerText = 'Prüfe...';
+  try {{
+    const res = await(await fetch('/api/check_update')).json();
+    if(res.status === 'ok') {{
+      if(res.update_available) {{
+        document.getElementById('updBanner').classList.remove('hidden');
+        document.getElementById('updMsg').innerText = `🚀 Neues Update verfügbar: v${{res.remote_version}} (Installiert: v${{res.current_version}})`;
+        showToast(`Update verfügbar: v${{res.remote_version}}`, 'info');
+      }} else {{
+        showToast(`✓ Auf neuestem Stand (v${{res.current_version}})`, 'success');
+        btnTxt.innerText = `✓ v${{res.current_version}}`;
+        setTimeout(() => {{ btnTxt.innerText = 'Update suchen'; }}, 3000);
+      }}
+    }} else {{
+      showToast('Update-Prüfung fehlgeschlagen: ' + (res.message || 'Offline'), 'error');
+      btnTxt.innerText = 'Update suchen';
+    }}
+  }} catch(e) {{
+    showToast('Verbindungsfehler beim Update-Check', 'error');
+    btnTxt.innerText = 'Update suchen';
+  }}
+  btn.disabled = false;
+}}
+
+async function installUpdate(){{
+  const btn = document.getElementById('updInstBtn');
+  btn.disabled = true; btn.innerText = '⏳ Lade herunter...';
+  try {{
+    const res = await(await fetch('/api/install_update', {{ method: 'POST' }})).json();
+    if(res.status === 'ok') {{
+      showToast(res.message, 'success');
+      btn.innerText = '✓ Installiert!';
+      setTimeout(() => {{ window.location.reload(); }}, 2500);
+    }} else {{
+      showToast('Installationsfehler: ' + res.message, 'error');
+      btn.disabled = false; btn.innerText = 'Jetzt installieren';
+    }}
+  }} catch(e) {{
+    showToast('Fehler bei Update-Installation', 'error');
+    btn.disabled = false; btn.innerText = 'Jetzt installieren';
+  }}
+}}
 </script></body></html>"""
+
+class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
 
 class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
@@ -1080,127 +1295,248 @@ class H(BaseHTTPRequestHandler):
         elif p == "/api/config":
             k = get_gemini_api_key()
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"has_key": bool(k), "masked_key": f"{k[:6]}...{k[-4:]}" if len(k)>10 else "***"}).encode("utf-8"))
+        elif p == "/api/check_update":
+            try:
+                req = urllib.request.Request(GITHUB_RAW_URL, headers={"User-Agent": "TECH-DUDE-CLIENT"})
+                with urllib.request.urlopen(req, timeout=3.5) as resp:
+                    remote_code = resp.read().decode("utf-8")
+                    m = re.search(r'CURRENT_VERSION\s*=\s*["\']([^"\']+)["\']', remote_code)
+                    if m:
+                        remote_ver = m.group(1).strip()
+                        update_avail = remote_ver != CURRENT_VERSION
+                        self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                        self.wfile.write(json.dumps({"status": "ok", "current_version": CURRENT_VERSION, "remote_version": remote_ver, "update_available": update_avail}).encode("utf-8"))
+                        return
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(json.dumps({"status": "ok", "current_version": CURRENT_VERSION, "remote_version": CURRENT_VERSION, "update_available": False}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": str(e), "current_version": CURRENT_VERSION}).encode("utf-8"))
         elif p == "/api/active_track":
             auds = sorted(glob.glob(os.path.join(VAULT, "*.mp3")) + glob.glob(os.path.join(VAULT, "*.wav")) + glob.glob(os.path.join(VAULT, "*.m4a")) + glob.glob(os.path.join(VAULT, "*.aiff")))
             if auds:
-                curr_path = auds[0]
+                curr_path = SHARED_STATE.get("active_track_file", "")
+                if not curr_path or curr_path not in auds:
+                    curr_path = auds[0]
+                    SHARED_STATE["active_track_file"] = curr_path
+                    
+                vault_files = [os.path.basename(a) for a in auds]
+                
                 try: curr_mtime = os.path.getmtime(curr_path)
-                except: curr_mtime = 0
+                except Exception: curr_mtime = 0
+                
                 if TRACK_CACHE["path"] == curr_path and TRACK_CACHE["mtime"] == curr_mtime and TRACK_CACHE["data"]:
                     res = TRACK_CACHE["data"]
+                    res["vault_files"] = vault_files
                 elif TRACK_CACHE["processing"]:
-                    res = {"has_audio": True, "processing": True, "filename": "Analysiere...", "waveform": []}
+                    res = {"has_audio": True, "processing": True, "filename": "Analysiere...", "vault_files": vault_files, "waveform": []}
                 else:
                     TRACK_CACHE["processing"] = True
                     info = analyze_track_details(curr_path)
-                    res = {"has_audio": True, "processing": False, "filename": info["filename"], "duration_sec": info["duration_sec"], "duration_str": info["duration_str"], "detected_bpm": info["detected_bpm"], "drop_sec": find_loudest_drop(curr_path), "waveform": extract_waveform_envelope(curr_path, 100)}
+                    res = {"has_audio": True, "processing": False, "filename": info["filename"], "vault_files": vault_files, "duration_sec": info["duration_sec"], "duration_str": info["duration_str"], "detected_bpm": info["detected_bpm"], "drop_sec": find_loudest_drop(curr_path), "waveform": extract_waveform_envelope(curr_path, 100)}
                     TRACK_CACHE.update({"path": curr_path, "mtime": curr_mtime, "data": res, "processing": False})
             else:
                 TRACK_CACHE.update({"path": "", "data": None, "processing": False})
-                res = {"has_audio": False, "processing": False, "filename": "", "duration_sec": 180.0, "duration_str": "--:--", "detected_bpm": 155.0, "drop_sec": 2.30, "waveform": []}
+                res = {"has_audio": False, "processing": False, "filename": "", "vault_files": [], "duration_sec": 180.0, "duration_str": "--:--", "detected_bpm": 155.0, "drop_sec": 2.30, "waveform": []}
             self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(res).encode("utf-8"))
-        elif p == "/api/stream_video":
-            f = urllib.parse.unquote(self.path.split("p=")[-1])
-            if os.path.isfile(f) and f.lower().endswith((".mp4", ".mov", ".m4v")):
-                sz = os.path.getsize(f)
-                range_header = self.headers.get("Range")
-                if range_header:
-                    m = re.search(r'bytes=(\d+)-(\d*)', range_header)
-                    if m:
-                        start = int(m.group(1))
-                        end = m.group(2); end = int(end) if end else sz - 1
-                        length = end - start + 1
-                        self.send_response(206)
-                        self.send_header("Content-Type", "video/mp4")
-                        self.send_header("Accept-Ranges", "bytes")
-                        self.send_header("Content-Range", f"bytes {start}-{end}/{sz}")
-                        self.send_header("Content-Length", str(length))
-                        self.end_headers()
-                        with open(f, "rb") as vf:
-                            vf.seek(start)
-                            self.wfile.write(vf.read(length))
-                        return
-                self.send_response(200); self.send_header("Content-Type", "video/mp4"); self.send_header("Accept-Ranges", "bytes"); self.send_header("Content-Length", str(sz)); self.end_headers()
-                with open(f, "rb") as vf: shutil.copyfileobj(vf, self.wfile)
-            else: self.send_response(404); self.end_headers()
+        elif p == "/api/pick_folder":
+            try:
+                apple_script = '''tell application "Finder"
+                    activate
+                    set myFolder to choose folder with prompt "Wähle einen Ordner zum Scannen:"
+                    POSIX path of myFolder
+                end tell'''
+                res = subprocess.check_output(['osascript', '-e', apple_script]).decode('utf-8').strip()
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"path": res}).encode("utf-8"))
+            except Exception:
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"path": ""}).encode("utf-8"))
         elif p == "/api/folder":
-            subprocess.Popen(["open", VAULT if self.path.split("t=")[-1] == "vault" else EXPORT])
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            target = VAULT if q.get("t", [""])[0] == "vault" else EXPORT
+            subprocess.Popen(["open", target])
             self.send_response(200); self.end_headers()
         elif p == "/api/reveal":
-            f = urllib.parse.unquote(self.path.split("p=")[-1])
-            if os.path.exists(f): subprocess.Popen(["open", "-R", f])
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            fp = q.get("p", [""])[0]
+            if fp and os.path.exists(fp): subprocess.Popen(["open", "-R", fp])
             self.send_response(200); self.end_headers()
         elif p == "/api/copy_vault":
-            f = urllib.parse.unquote(self.path.split("path=")[-1])
-            if os.path.isfile(f): shutil.copy2(f, os.path.join(VAULT, os.path.basename(f)))
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"status": "ok"}).encode("utf-8"))
-        else: self.send_response(404); self.end_headers()
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            fp = q.get("path", [""])[0]
+            if fp and os.path.exists(fp):
+                dst = os.path.join(VAULT, os.path.basename(fp))
+                shutil.copy2(fp, dst)
+                SHARED_STATE["active_track_file"] = dst
+                TRACK_CACHE["path"] = ""
+            self.send_response(200); self.end_headers()
+        elif p.startswith("/api/stream_video"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            video_path = q.get("p", [""])[0]
+            if not video_path or not os.path.exists(video_path):
+                self.send_response(404); self.end_headers(); return
+
+            file_size = os.path.getsize(video_path)
+            range_header = self.headers.get("Range", None)
+            
+            if range_header:
+                range_match = re.search(r'bytes=(\d+)-(\d*)', range_header)
+                if range_match:
+                    start = int(range_match.group(1))
+                    end = int(range_match.group(2)) if range_match.group(2) else file_size - 1
+                    end = min(end, file_size - 1)
+                    length = end - start + 1
+                    
+                    self.send_response(206)
+                    self.send_header("Content-Type", "video/mp4")
+                    self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+                    self.send_header("Content-Length", str(length))
+                    self.send_header("Accept-Ranges", "bytes")
+                    self.end_headers()
+                    
+                    with open(video_path, "rb") as f:
+                        f.seek(start)
+                        self.wfile.write(f.read(length))
+                    return
+
+            self.send_response(200)
+            self.send_header("Content-Type", "video/mp4")
+            self.send_header("Content-Length", str(file_size))
+            self.send_header("Accept-Ranges", "bytes")
+            self.end_headers()
+            with open(video_path, "rb") as f: shutil.copyfileobj(f, self.wfile)
+        else:
+            self.send_response(404); self.end_headers()
 
     def do_POST(self):
         if not self.check_origin(): return
+        p = self.path.split("?")[0]
         length = int(self.headers.get("Content-Length", 0))
-        content_type = self.headers.get("Content-Type", "")
         
-        if self.path == "/api/upload":
-            boundary = content_type.split("boundary=")[-1].encode("utf-8")
-            raw_body = self.rfile.read(length)
-            for part in raw_body.split(boundary):
-                if b'filename="' in part:
-                    fn_match = re.search(rb'filename="([^"]+)"', part)
-                    if fn_match:
-                        raw_fn = fn_match.group(1).decode("utf-8", errors="ignore")
-                        filename = os.path.basename(raw_fn).strip()
-                        if not filename: continue
-                        data_start = part.find(b"\r\n\r\n") + 4
-                        data_end = len(part)
-                        if part.endswith(b"\r\n--\r\n"): data_end -= 6
-                        elif part.endswith(b"\r\n--"): data_end -= 4
-                        elif part.endswith(b"\r\n"): data_end -= 2
-                        with open(os.path.join(VAULT, filename), "wb") as f_up: f_up.write(part[data_start:data_end])
+        if p == "/api/upload":
+            content_type = self.headers.get("Content-Type", "")
+            if "boundary=" in content_type:
+                boundary = content_type.split("boundary=")[1].strip()
+                raw_bytes = self.rfile.read(length)
+                boundary_bytes = ("--" + boundary).encode("utf-8")
+                parts = raw_bytes.split(boundary_bytes)
+                for part in parts:
+                    if b'filename="' in part:
+                        headers_raw, file_body = part.split(b"\r\n\r\n", 1)
+                        m = re.search(rb'filename="([^"]+)"', headers_raw)
+                        if m:
+                            filename = m.group(1).decode("utf-8")
+                            if file_body.endswith(b"\r\n"): file_body = file_body[:-2]
+                            dest = os.path.join(VAULT, filename)
+                            with open(dest, "wb") as f: f.write(file_body)
+                            SHARED_STATE["active_track_file"] = dest
+                            TRACK_CACHE["path"] = ""
             self.send_response(200); self.end_headers()
             return
 
         body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
-        try: d = json.loads(body)
-        except: d = {}
+        data = json.loads(body) if body else {}
 
-        if self.path == "/api/config":
-            cfg = load_user_config(); cfg["gemini_api_key"] = d.get("gemini_api_key", "").strip(); ok = save_user_config(cfg)
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"status": "ok" if ok else "error", "message": "Gespeichert" if ok else "Fehler"}).encode("utf-8"))
-        elif self.path == "/api/gemini/generate_hooks":
-            hooks, src = generate_viral_hooks(d.get("track", ""), float(d.get("bpm", 155.0)), d.get("style", "warehouse"))
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"status": "ok", "hooks": hooks}).encode("utf-8"))
-        elif self.path == "/api/gemini/parse_notes":
-            parsed, src = parse_messy_tracklist_with_ai(d.get("raw_text", ""))
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"status": "ok", "parsed": parsed}).encode("utf-8"))
-        elif self.path == "/api/autopilot":
-            auds = sorted(glob.glob(os.path.join(VAULT, "*.mp3")) + glob.glob(os.path.join(VAULT, "*.wav")) + glob.glob(os.path.join(VAULT, "*.m4a")) + glob.glob(os.path.join(VAULT, "*.aiff")))
-            threading.Thread(target=run_job, args=("warehouse", 1, "UNRELEASED ID?", True, "9:16", 16, find_loudest_drop(auds[0]) if auds else 2.30, float(d.get("bpm", 155.0)), d.get("mode", "turbo")), daemon=True).start()
-            self.send_response(200); self.end_headers()
-        elif self.path == "/api/render":
-            threading.Thread(target=run_job, args=(d.get("p", "warehouse"), d.get("v", 1), d.get("hook", ""), d.get("retention", True), d.get("fmt", "9:16"), d.get("beats", 16), float(d["drop"]) if d.get("drop") is not None else None, float(d.get("bpm", 155.0)), d.get("mode", "turbo")), daemon=True).start()
-            self.send_response(200); self.end_headers()
-        elif self.path == "/api/crate_scan":
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(parse_and_scan_crate(d.get("text", ""))).encode("utf-8"))
-        elif self.path == "/api/crate_export":
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(export_denon_m3u8(d.get("name", "Denon_Gig_Playlist"))).encode("utf-8"))
-        elif self.path == "/api/cleaner/scan":
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(scan_cleaner_folder(d.get("folder", "~/Downloads"))).encode("utf-8"))
-        elif self.path == "/api/cleaner/execute":
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(apply_cleaning_actions(d.get("modifications", []))).encode("utf-8"))
-        elif self.path.startswith("/api/cleaner/trash"):
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(trash_file_safely(urllib.parse.unquote(self.path.split("path=")[-1]))).encode("utf-8"))
-        elif self.path.startswith("/api/bridge/to_teaser"):
-            p = urllib.parse.unquote(self.path.split("path=")[-1])
-            if os.path.isfile(p): shutil.copy2(p, os.path.join(VAULT, os.path.basename(p)))
-            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps({"status": "ok"}).encode("utf-8"))
-        else: self.send_response(404); self.end_headers()
+        if p == "/api/config":
+            cfg = load_user_config()
+            new_key = data.get("gemini_api_key", "").strip()
+            cfg["gemini_api_key"] = new_key
+            save_user_config(cfg)
+            test_resp = call_gemini_api("Antworte mit 'OK'", timeout=2.5) if new_key else None
+            msg = "✓ Gemini Cloud-Brain Online!" if test_resp else ("Key gespeichert (Bunker-Fallback aktiv)" if new_key else "Key entfernt")
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(json.dumps({"status": "ok", "message": msg, "cloud_active": bool(test_resp)}).encode("utf-8"))
+        elif p == "/api/install_update":
+            try:
+                req = urllib.request.Request(GITHUB_RAW_URL, headers={"User-Agent": "TECH-DUDE-UPDATER"})
+                with urllib.request.urlopen(req, timeout=8.0) as resp:
+                    new_code = resp.read().decode("utf-8")
+                if "CURRENT_VERSION" in new_code and "APP_NAME" in new_code:
+                    current_file = os.path.abspath(__file__)
+                    with open(current_file, "w", encoding="utf-8") as f:
+                        f.write(new_code)
+                    
+                    # Automatischer Server-Neustart in 1 Sekunde
+                    def restart_daemon():
+                        time.sleep(1.2)
+                        os.execv(sys.executable, [sys.executable, current_file])
+                    threading.Thread(target=restart_daemon, daemon=True).start()
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer): daemon_threads, allow_reuse_address = True, True
+                    self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                    self.wfile.write(json.dumps({"status": "ok", "message": "✓ Update erfolgreich! Server startet neu..."}).encode("utf-8"))
+                    return
+                else:
+                    self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                    self.wfile.write(json.dumps({"status": "error", "message": "Fehlerhafte Update-Datei auf GitHub."}).encode("utf-8"))
+            except Exception as e:
+                self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+                self.wfile.write(json.dumps({"status": "error", "message": f"Update fehlgeschlagen: {str(e)}"}).encode("utf-8"))
+        elif p == "/api/set_active_track":
+            fname = data.get("filename", "")
+            target = os.path.join(VAULT, fname)
+            if os.path.exists(target):
+                SHARED_STATE["active_track_file"] = target
+                TRACK_CACHE["path"] = ""
+            self.send_response(200); self.end_headers()
+        elif p == "/api/gemini/generate_hooks":
+            hooks, mode = generate_viral_hooks(data.get("track", ""), data.get("bpm", 155), data.get("style", "warehouse"))
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(json.dumps({"hooks": hooks, "source": mode}).encode("utf-8"))
+        elif p == "/api/gemini/parse_notes":
+            parsed, mode = parse_messy_tracklist_with_ai(data.get("raw_text", ""))
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers()
+            self.wfile.write(json.dumps({"parsed": parsed, "source": mode}).encode("utf-8"))
+        elif p == "/api/autopilot":
+            bpm = float(data.get("bpm", 155.0))
+            mode = data.get("mode", "turbo")
+            threading.Thread(target=run_job, args=("warehouse", 1, "", True, "9:16", 16, None, bpm, mode)).start()
+            self.send_response(200); self.end_headers()
+        elif p == "/api/render":
+            p_val = data.get("p", "warehouse")
+            v_val = int(data.get("v", 1))
+            h_val = data.get("hook", "")
+            ret_val = bool(data.get("retention", True))
+            fmt_val = data.get("fmt", "9:16")
+            beats_val = int(data.get("beats", 16))
+            bpm_val = float(data.get("bpm", 155.0))
+            mode_val = data.get("mode", "turbo")
+            drop_val = float(data.get("drop")) if data.get("drop") is not None else None
+            threading.Thread(target=run_job, args=(p_val, v_val, h_val, ret_val, fmt_val, beats_val, drop_val, bpm_val, mode_val)).start()
+            self.send_response(200); self.end_headers()
+        elif p == "/api/crate_scan":
+            res = parse_and_scan_crate(data.get("text", ""))
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif p == "/api/crate_export":
+            res = export_denon_m3u8(data.get("name", "Denon_Gig_Playlist"))
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif p == "/api/cleaner/scan":
+            f_target = data.get("folder", SHARED_STATE["active_folder"])
+            res = scan_cleaner_folder(f_target)
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif p == "/api/cleaner/execute":
+            res = apply_cleaning_actions(data.get("modifications", []))
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif p.startswith("/api/cleaner/trash"):
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            fp = q.get("path", [""])[0]
+            res = trash_file_safely(fp)
+            self.send_response(200); self.send_header("Content-Type", "application/json"); self.end_headers(); self.wfile.write(json.dumps(res).encode("utf-8"))
+        elif p == "/api/bridge/to_teaser":
+            fp = data.get("path", "")
+            if fp and os.path.exists(fp):
+                dst = os.path.join(VAULT, os.path.basename(fp))
+                if os.path.abspath(fp) != os.path.abspath(dst): shutil.copy2(fp, dst)
+                SHARED_STATE["active_track_file"] = dst
+                TRACK_CACHE["path"] = ""
+            self.send_response(200); self.end_headers()
+        else:
+            self.send_response(404); self.end_headers()
+
 def main():
-    server = ThreadedHTTPServer(("127.0.0.1", 8505), H)
-    print(f"\n[OK] {APP_NAME} V{CURRENT_VERSION} (Stabilization Master) aktiv unter: http://127.0.0.1:8505")
+    port = 8505
+    server = ThreadedHTTPServer(("127.0.0.1", port), H)
+    print(f"[{APP_NAME}] Master Server V{CURRENT_VERSION} läuft auf http://127.0.0.1:{port}")
     try: server.serve_forever()
     except KeyboardInterrupt: server.server_close()
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    main()
